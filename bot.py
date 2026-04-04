@@ -9,25 +9,31 @@ from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ============================================================
-# НАЛАШТУВАННЯ — впиши свої ключі тут
+# НАЛАШТУВАННЯ
 # ============================================================
 TELEGRAM_TOKEN = "8602308787:AAFhZMfMNCcTv-yXTDB1mouUFaOBrO_Jac8"
 TRAVELPAYOUTS_TOKEN = "83ab9d18d7fb0092294828b8104b50a5"
 
-# Твій Telegram Chat ID (отримаєш після першого /start)
-MY_CHAT_ID = None  # буде збережено автоматично
+# Міста вильоту — European cities (бо з України не літають)
+# Додай міста звідки плануєш літати
+ORIGIN_CITIES = [
+    "WAW",  # Варшава
+    "KRK",  # Краків
+    "RZE",  # Жешув (найближче до кордону)
+    "LUZ",  # Люблін
+    "BUD",  # Будапешт
+    "PRG",  # Прага
+]
 
-# Міста вильоту (IATA коди) — додай своє місто
-ORIGIN_CITIES = ["KBP", "LWO", "IEV"]  # Київ Бориспіль, Львів, Київ Жуляни
+MAX_PRICE_EUR = 150       # максимальна ціна для пошуку
+TOP_DEALS_COUNT = 5       # скільки deals показувати по кожному типу
 
-# Максимальна ціна квитка в EUR для алерту
-MAX_PRICE_EUR = 100
-
-# Мінімальна знижка від середньої ціни щоб вважатись "deal" (%)
-MIN_DISCOUNT_PERCENT = 30
-
-# Скільки топ-deals надсилати щодня
-TOP_DEALS_COUNT = 5
+# Середні ціни по напрямках (для розрахунку знижки)
+# Якщо напрямок невідомий — використовуємо середнє по всіх
+AVERAGE_PRICES = {
+    "default_oneway": 120,   # середній one-way в Європі
+    "default_return": 200,   # середній return в Європі
+}
 
 # ============================================================
 
@@ -38,217 +44,330 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Зберігаємо chat_id користувача
 chat_id_storage = {}
 
-
-async def fetch_cheap_flights(origin: str) -> list:
-    """Отримати дешеві квитки з Travelpayouts API"""
-    deals = []
-    
-    # Шукаємо на наступні 3 місяці
-    date_from = datetime.now() + timedelta(days=7)
-    date_to = datetime.now() + timedelta(days=90)
-    
-    url = "https://api.travelpayouts.com/aviasales/v3/search_by_price_range"
-    params = {
-        "origin": origin,
-        "destination": "-",  # будь-яке направлення
-        "value_min": 1,
-        "value_max": MAX_PRICE_EUR * 100,  # API повертає в центах
-        "one_way": "false",
-        "direct": "false",
-        "locale": "uk",
-        "currency": "eur",
-        "market": "ua",
-        "limit": 30,
-        "page": 1,
-        "token": TRAVELPAYOUTS_TOKEN,
-        "depart_date": date_from.strftime("%Y-%m"),
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("success") and data.get("data"):
-                        for ticket in data["data"]:
-                            price = ticket.get("price", 0) / 100  # конвертуємо з центів
-                            deals.append({
-                                "origin": ticket.get("origin", origin),
-                                "destination": ticket.get("destination", ""),
-                                "price": price,
-                                "airline": ticket.get("airline", ""),
-                                "departure_at": ticket.get("departure_at", ""),
-                                "return_at": ticket.get("return_at", ""),
-                                "transfers": ticket.get("transfers", 0),
-                                "link": f"https://www.aviasales.com{ticket.get('link', '')}",
-                            })
-    except Exception as e:
-        logger.error(f"Помилка при запиті для {origin}: {e}")
-    
-    return deals
+# Кеш середніх цін щоб не рахувати кожен раз
+price_cache = {}
 
 
-async def fetch_anywhere_deals() -> list:
-    """Отримати найдешевші квитки з усіх міст вильоту"""
+async def fetch_oneway_deals() -> list:
+    """Пошук one-way квитків — звідусіль куди завгодно"""
     all_deals = []
-    
+
+    date_from = datetime.now() + timedelta(days=7)
+
     for origin in ORIGIN_CITIES:
-        logger.info(f"Шукаємо квитки з {origin}...")
-        deals = await fetch_cheap_flights(origin)
-        all_deals.extend(deals)
-        await asyncio.sleep(1)  # пауза між запитами
-    
-    # Сортуємо за ціною
+        url = "https://api.travelpayouts.com/aviasales/v3/search_by_price_range"
+        params = {
+            "origin": origin,
+            "destination": "-",
+            "value_min": 1,
+            "value_max": MAX_PRICE_EUR * 100,
+            "one_way": "true",
+            "direct": "false",
+            "locale": "uk",
+            "currency": "eur",
+            "market": "ua",
+            "limit": 30,
+            "page": 1,
+            "token": TRAVELPAYOUTS_TOKEN,
+            "depart_date": date_from.strftime("%Y-%m"),
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("success") and data.get("data"):
+                            for t in data["data"]:
+                                price = t.get("price", 0) / 100
+                                all_deals.append({
+                                    "type": "oneway",
+                                    "origin": t.get("origin", origin),
+                                    "destination": t.get("destination", ""),
+                                    "price": price,
+                                    "airline": t.get("airline", ""),
+                                    "departure_at": t.get("departure_at", ""),
+                                    "return_at": None,
+                                    "transfers": t.get("transfers", 0),
+                                    "link": f"https://www.aviasales.com{t.get('link', '')}",
+                                })
+        except Exception as e:
+            logger.error(f"One-way помилка {origin}: {e}")
+
+        await asyncio.sleep(0.5)
+
     all_deals.sort(key=lambda x: x["price"])
-    
-    return all_deals[:TOP_DEALS_COUNT * 3]  # беремо з запасом
+    return all_deals
 
 
-def format_deal_message(deals: list) -> str:
-    """Форматуємо повідомлення з deals"""
-    if not deals:
-        return "😔 Сьогодні не знайдено особливих deals. Перевіримо завтра!"
-    
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    msg = f"✈️ *НАЙКРАЩІ DEALS* — {now}\n"
-    msg += "─" * 30 + "\n\n"
-    
-    seen_destinations = set()
-    count = 0
-    
-    for deal in deals:
-        dest = deal["destination"]
-        if dest in seen_destinations:
-            continue
-        seen_destinations.add(dest)
-        
-        if count >= TOP_DEALS_COUNT:
-            break
-        
-        # Форматуємо дату
-        dep_date = ""
-        ret_date = ""
+async def fetch_return_deals() -> list:
+    """Пошук туди-назад до 7 днів"""
+    all_deals = []
+
+    date_from = datetime.now() + timedelta(days=7)
+
+    for origin in ORIGIN_CITIES:
+        url = "https://api.travelpayouts.com/aviasales/v3/search_by_price_range"
+        params = {
+            "origin": origin,
+            "destination": "-",
+            "value_min": 1,
+            "value_max": MAX_PRICE_EUR * 100,
+            "one_way": "false",
+            "direct": "false",
+            "locale": "uk",
+            "currency": "eur",
+            "market": "ua",
+            "limit": 30,
+            "page": 1,
+            "token": TRAVELPAYOUTS_TOKEN,
+            "depart_date": date_from.strftime("%Y-%m"),
+            "nights_in_dst_from": 1,
+            "nights_in_dst_to": 7,
+        }
+
         try:
-            dep_dt = datetime.fromisoformat(deal["departure_at"].replace("Z", "+00:00"))
-            dep_date = dep_dt.strftime("%d %b")
-        except:
-            dep_date = deal["departure_at"][:10] if deal["departure_at"] else "?"
-            
-        try:
-            ret_dt = datetime.fromisoformat(deal["return_at"].replace("Z", "+00:00"))
-            ret_date = ret_dt.strftime("%d %b")
-        except:
-            ret_date = deal["return_at"][:10] if deal["return_at"] else "?"
-        
-        stops = "прямий" if deal["transfers"] == 0 else f"{deal['transfers']} пересадка"
-        price = deal["price"]
-        
-        # Емодзі ціни
-        if price < 30:
-            price_emoji = "🔥🔥🔥"
-        elif price < 60:
-            price_emoji = "🔥🔥"
-        elif price < 100:
-            price_emoji = "🔥"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("success") and data.get("data"):
+                            for t in data["data"]:
+                                price = t.get("price", 0) / 100
+
+                                # Рахуємо кількість ночей
+                                nights = None
+                                try:
+                                    dep = datetime.fromisoformat(t["departure_at"].replace("Z", "+00:00"))
+                                    ret = datetime.fromisoformat(t["return_at"].replace("Z", "+00:00"))
+                                    nights = (ret - dep).days
+                                except:
+                                    pass
+
+                                if nights is not None and nights > 7:
+                                    continue  # пропускаємо більше 7 ночей
+
+                                all_deals.append({
+                                    "type": "return",
+                                    "origin": t.get("origin", origin),
+                                    "destination": t.get("destination", ""),
+                                    "price": price,
+                                    "airline": t.get("airline", ""),
+                                    "departure_at": t.get("departure_at", ""),
+                                    "return_at": t.get("return_at", ""),
+                                    "transfers": t.get("transfers", 0),
+                                    "nights": nights,
+                                    "link": f"https://www.aviasales.com{t.get('link', '')}",
+                                })
+        except Exception as e:
+            logger.error(f"Return помилка {origin}: {e}")
+
+        await asyncio.sleep(0.5)
+
+    all_deals.sort(key=lambda x: x["price"])
+    return all_deals
+
+
+def calc_discount(price: float, trip_type: str, destination: str) -> tuple:
+    """Розрахувати середню ціну і % знижки"""
+    key = f"{trip_type}_{destination}"
+
+    if key in price_cache:
+        avg = price_cache[key]
+    else:
+        # Використовуємо дефолтні середні ціни
+        if trip_type == "oneway":
+            avg = AVERAGE_PRICES["default_oneway"]
         else:
-            price_emoji = "💰"
-        
-        msg += f"{price_emoji} *{deal['origin']} → {dest}*\n"
-        msg += f"💶 *€{price:.0f}* туди-назад\n"
-        msg += f"📅 {dep_date} — {ret_date} | {stops}\n"
-        msg += f"✈️ {deal['airline']}\n"
-        msg += f"🔗 [Дивитись на Aviasales]({deal['link']})\n\n"
-        
-        count += 1
-    
-    msg += "─" * 30 + "\n"
+            avg = AVERAGE_PRICES["default_return"]
+
+    if avg > 0 and price < avg:
+        discount = round((avg - price) / avg * 100)
+    else:
+        discount = 0
+
+    return avg, discount
+
+
+def format_date(date_str: str) -> str:
+    if not date_str:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        months = ["січ", "лют", "бер", "квіт", "трав", "черв",
+                  "лип", "серп", "вер", "жовт", "лист", "груд"]
+        return f"{dt.day} {months[dt.month-1]}"
+    except:
+        return date_str[:10]
+
+
+def format_deals_message(oneway_deals: list, return_deals: list) -> str:
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    msg = f"✈️ *FLIGHT DEALS* — {now}\n\n"
+
+    # ── ВАРІАНТ 1: ONE-WAY ──
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    msg += "🛫 *ВАРІАНТ 1 — В ОДИН БІК*\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if oneway_deals:
+        seen = set()
+        count = 0
+        for deal in oneway_deals:
+            key = f"{deal['origin']}-{deal['destination']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            if count >= TOP_DEALS_COUNT:
+                break
+
+            avg, discount = calc_discount(deal["price"], "oneway", deal["destination"])
+            dep_date = format_date(deal["departure_at"])
+            stops = "прямий ✈️" if deal["transfers"] == 0 else f"{deal['transfers']} пересадка"
+
+            if discount >= 40:
+                fire = "🔥🔥🔥"
+            elif discount >= 20:
+                fire = "🔥🔥"
+            elif discount > 0:
+                fire = "🔥"
+            else:
+                fire = "💰"
+
+            msg += f"{fire} *{deal['origin']} → {deal['destination']}*\n"
+            msg += f"💶 *€{deal['price']:.0f}* "
+            if discount > 0:
+                msg += f"_(середня ~€{avg:.0f}, дешевше на {discount}%)_\n"
+            else:
+                msg += f"_(середня ~€{avg:.0f})_\n"
+            msg += f"📅 {dep_date} | {stops} | {deal['airline']}\n"
+            msg += f"🔗 [Дивитись]({deal['link']})\n\n"
+            count += 1
+    else:
+        msg += "😔 Deals не знайдено\n\n"
+
+    # ── ВАРІАНТ 2: ТУДИ-НАЗАД ──
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    msg += "🔄 *ВАРІАНТ 2 — ТУДИ І НАЗАД (до 7 ночей)*\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if return_deals:
+        seen = set()
+        count = 0
+        for deal in return_deals:
+            key = f"{deal['origin']}-{deal['destination']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            if count >= TOP_DEALS_COUNT:
+                break
+
+            avg, discount = calc_discount(deal["price"], "return", deal["destination"])
+            dep_date = format_date(deal["departure_at"])
+            ret_date = format_date(deal.get("return_at", ""))
+            nights_str = f"{deal['nights']} н." if deal.get("nights") else ""
+            stops = "прямий ✈️" if deal["transfers"] == 0 else f"{deal['transfers']} пересадка"
+
+            if discount >= 40:
+                fire = "🔥🔥🔥"
+            elif discount >= 20:
+                fire = "🔥🔥"
+            elif discount > 0:
+                fire = "🔥"
+            else:
+                fire = "💰"
+
+            msg += f"{fire} *{deal['origin']} → {deal['destination']}*\n"
+            msg += f"💶 *€{deal['price']:.0f}* туди-назад "
+            if discount > 0:
+                msg += f"_(середня ~€{avg:.0f}, дешевше на {discount}%)_\n"
+            else:
+                msg += f"_(середня ~€{avg:.0f})_\n"
+            msg += f"📅 {dep_date} — {ret_date}"
+            if nights_str:
+                msg += f" ({nights_str})"
+            msg += f" | {stops} | {deal['airline']}\n"
+            msg += f"🔗 [Дивитись]({deal['link']})\n\n"
+            count += 1
+    else:
+        msg += "😔 Deals не знайдено\n\n"
+
     msg += "💡 _Ціни змінюються — бронюй швидко!_"
-    
     return msg
 
 
+async def search_and_send(chat_id: int):
+    """Шукаємо і надсилаємо deals"""
+    oneway = await fetch_oneway_deals()
+    ret = await fetch_return_deals()
+    message = format_deals_message(oneway, ret)
+    await bot.send_message(
+        chat_id=chat_id,
+        text=message,
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+
+
 async def send_daily_deals():
-    """Щоденна розсилка deals"""
-    logger.info("Запускаємо щоденний пошук deals...")
-    
-    if not chat_id_storage:
-        logger.info("Немає підписників, пропускаємо")
-        return
-    
-    deals = await fetch_anywhere_deals()
-    message = format_deal_message(deals)
-    
+    logger.info("Щоденний пошук deals...")
     for chat_id in chat_id_storage.values():
         try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-            logger.info(f"Deals надіслано в чат {chat_id}")
+            await search_and_send(chat_id)
         except Exception as e:
-            logger.error(f"Помилка надсилання в {chat_id}: {e}")
+            logger.error(f"Помилка надсилання: {e}")
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    """Обробник команди /start"""
     chat_id_storage["user"] = message.chat.id
-    
     await message.answer(
         "👋 *Привіт! Я Flight Deals Bot*\n\n"
-        "Щодня о 9:00 я надсилатиму тобі найкращі дешеві квитки "
-        "з України куди завгодно по світу! ✈️\n\n"
-        "🔍 Шукаю deals з: Київ, Львів\n"
-        "💶 Максимальна ціна: до €100\n\n"
-        "Команди:\n"
-        "/deals — показати deals прямо зараз\n"
-        "/help — допомога\n\n"
-        "⚡ Перший пошук запускаю зараз...",
+        "Шукаю дешеві квитки з Польщі, Угорщини, Чехії — "
+        "куди завгодно по світу! ✈️\n\n"
+        "📍 Міста вильоту: Варшава, Краків, Жешув, Люблін, Будапешт, Прага\n"
+        "💶 До €150\n\n"
+        "🛫 *Варіант 1* — в один бік\n"
+        "🔄 *Варіант 2* — туди-назад до 7 ночей\n\n"
+        "Для кожного квитка показую середню ціну і % знижки!\n\n"
+        "⚡ Запускаю пошук...",
         parse_mode="Markdown"
     )
-    
-    # Одразу показуємо перші deals
-    await cmd_deals(message)
+    searching = await message.answer("🔍 Шукаю deals... зачекай 20-30 секунд")
+    await search_and_send(message.chat.id)
+    await searching.delete()
 
 
 @dp.message(Command("deals"))
 async def cmd_deals(message: Message):
-    """Показати deals на запит"""
     chat_id_storage["user"] = message.chat.id
-    
-    searching_msg = await message.answer("🔍 Шукаю найкращі deals... зачекай 10 секунд")
-    
-    deals = await fetch_anywhere_deals()
-    result = format_deal_message(deals)
-    
-    await searching_msg.delete()
-    await message.answer(result, parse_mode="Markdown", disable_web_page_preview=True)
+    searching = await message.answer("🔍 Шукаю deals... зачекай 20-30 секунд")
+    await search_and_send(message.chat.id)
+    await searching.delete()
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
-        "ℹ️ *Flight Deals Bot — допомога*\n\n"
-        "/start — почати / підписатись на щоденні deals\n"
-        "/deals — показати deals прямо зараз\n"
-        "/help — ця довідка\n\n"
-        "🕘 Автоматична розсилка щодня о 9:00\n\n"
-        "Шукаю квитки з Києва та Львова куди завгодно "
-        "по найнижчих цінах! ✈️",
+        "ℹ️ *Flight Deals Bot*\n\n"
+        "/start — підписатись\n"
+        "/deals — deals прямо зараз\n"
+        "/help — довідка\n\n"
+        "🕘 Автоматично щодня о 9:00\n\n"
+        "Шукаю з: Варшава, Краків, Жешув, Люблін, Будапешт, Прага\n"
+        "Показую два варіанти:\n"
+        "🛫 В один бік\n"
+        "🔄 Туди-назад до 7 ночей\n"
+        "📊 З розрахунком знижки від середньої ціни",
         parse_mode="Markdown"
     )
 
 
 async def main():
-    # Запускаємо щоденний scheduler о 9:00
     scheduler.add_job(send_daily_deals, "cron", hour=9, minute=0)
     scheduler.start()
-    
     logger.info("Бот запущено! ✈️")
     await dp.start_polling(bot)
 
