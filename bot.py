@@ -11,8 +11,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ============================================================
 # НАЛАШТУВАННЯ — впиши свої ключі тут
 # ============================================================
-TELEGRAM_TOKEN = 8602308787:AAFhZMfMNCcTv-yXTDB1mouUFaOBrO_Jac8
-TRAVELPAYOUTS_TOKEN = 83ab9d18d7fb0092294828b8104b50a5
+TELEGRAM_TOKEN = "8602308787:AAFhZMfMNCcTv-yXTDB1mouUFaOBrO_Jac8"
+TRAVELPAYOUTS_TOKEN = "83ab9d18d7fb0092294828b8104b50a5"
 
 # Твій Telegram Chat ID (отримаєш після першого /start)
 MY_CHAT_ID = None  # буде збережено автоматично
