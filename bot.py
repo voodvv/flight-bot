@@ -23,6 +23,10 @@ TOP_DEALS_COUNT = 5
 # НАЗВИ АЕРОПОРТІВ
 # ============================================================
 AIRPORT_NAMES = {
+    # Румунія / Молдова (Акцентні)
+    "SCV": "Сучава", "IAS": "Яси", "OTP": "Бухарест", "CLJ": "Клуж", 
+    "TSR": "Тімішоара", "SBZ": "Сібіу", "SUJ": "Сату-Маре", "BCM": "Бакеу", 
+    "MDU": "Кишинів",
     # Польща
     "WAW": "Варшава", "KRK": "Краків", "RZE": "Жешув", "WRO": "Вроцлав",
     "GDN": "Гданськ", "KTW": "Катовіце", "POZ": "Познань", "SZZ": "Щецін",
@@ -30,9 +34,6 @@ AIRPORT_NAMES = {
     "BUD": "Будапешт", "DEB": "Дебрецен",
     # Чехія / Словаччина
     "PRG": "Прага", "BRQ": "Брно", "BTS": "Братислава", "KSC": "Кошіце",
-    # Румунія / Молдова
-    "OTP": "Бухарест", "CLJ": "Клуж", "TSR": "Тімішоара", "IAS": "Яси",
-    "SBZ": "Сібіу", "SUJ": "Сату-Маре", "BCM": "Бакеу", "MDU": "Кишинів",
     # Балкани
     "BEG": "Белград", "INI": "Ніш", "ZAG": "Загреб", "OSI": "Осієк",
     "SKP": "Скоп'є", "TIA": "Тирана", "TGD": "Подгориця", "TIV": "Тіват",
@@ -90,9 +91,7 @@ AIRPORT_NAMES = {
     "ADB": "Ізмір", "ESB": "Анкара", "DLM": "Даламан", "BJV": "Бодрум",
     # Інше
     "TLV": "Тель-Авів", "STO": "Стокгольм (Скавста)",
-    "SCV": "Сучава (Румунія)", "MIL": "Мілан",
-    "IAS": "Яси (Румунія)",
-    "RMO": "Кишинів (Молдова)",
+    "MIL": "Мілан",
 }
 
 # Регіони призначення
@@ -105,15 +104,14 @@ REGIONS = {
     "🏰 Центр Європи":   ["VIE", "PRG", "BUD", "ZRH", "GVA", "MUC", "FRA", "BER"],
     "🌊 Канари":         ["ACE", "TFS", "TFN", "LPA", "FUE"],
     "🇬🇧 Британія":      ["LHR", "LGW", "STN", "MAN", "EDI", "DUB"],
-    "🌍 Всюди":          [],  # порожній = без фільтру
+    "🌍 Всюди":         [],  # порожній = без фільтру
 }
 
-# Аеропорти для пошуку (вильот)
+# Аеропорти для пошуку (вильот) - РУМУНІЯ НА ПЕРШОМУ МІСЦІ
 ORIGIN_CITIES = [
+    "SCV", "IAS", "OTP", "CLJ", "TSR", "MDU",  # Сучава та Ясси перші!
     "WAW", "KRK", "RZE", "WRO", "GDN", "KTW", "POZ",
     "BUD", "PRG", "BTS", "KSC",
-    "OTP", "CLJ", "TSR", "IAS", "SCV", "BCM",
-    "RMO",
     "VIE", "ZRH", "MUC", "FRA", "BER", "HAM", "STR", "DUS",
     "CDG", "ORY", "LYS", "NCE", "BOD",
     "LHR", "LGW", "STN", "MAN", "EDI", "BRS",
@@ -164,7 +162,7 @@ def get_user_settings(chat_id: int) -> dict:
         user_settings[chat_id] = {
             "budget": 150,
             "region": "🌍 Всюди",
-            "origins": list(ORIGIN_CITIES),
+            "origins": ["SCV", "IAS"], # АКЦЕНТ: За замовчуванням шукаємо тільки з Сучави та Яссів
             "one_way": True,
             "return": True,
         }
@@ -818,7 +816,7 @@ async def main():
         BotCommand(command="start", description="Головне меню"),
         BotCommand(command="deals", description="Шукати deals зараз"),
         BotCommand(command="menu", description="Налаштування"),
-        BotCommand(command="watch", description="Watchlist (напр: /watch WAW FCO 50)"),
+        BotCommand(command="watch", description="Watchlist (напр: /watch SCV FCO 50)"),
         BotCommand(command="help", description="Довідка"),
     ])
 
