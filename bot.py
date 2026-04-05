@@ -91,6 +91,8 @@ AIRPORT_NAMES = {
     # Інше
     "TLV": "Тель-Авів", "STO": "Стокгольм (Скавста)",
     "SCV": "Сучава (Румунія)", "MIL": "Мілан",
+    "IAS": "Яси (Румунія)",
+    "RMO": "Кишинів (Молдова)",
 }
 
 # Регіони призначення
@@ -110,7 +112,8 @@ REGIONS = {
 ORIGIN_CITIES = [
     "WAW", "KRK", "RZE", "WRO", "GDN", "KTW", "POZ",
     "BUD", "PRG", "BTS", "KSC",
-    "OTP", "CLJ", "TSR",
+    "OTP", "CLJ", "TSR", "IAS", "SCV", "BCM",
+    "RMO",
     "VIE", "ZRH", "MUC", "FRA", "BER", "HAM", "STR", "DUS",
     "CDG", "ORY", "LYS", "NCE", "BOD",
     "LHR", "LGW", "STN", "MAN", "EDI", "BRS",
