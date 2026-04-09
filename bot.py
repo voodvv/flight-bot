@@ -182,73 +182,41 @@ def cfg(cid: int) -> dict:
 # АВІА — кілька endpoint'ів для різноманіття
 # ============================================================
 
-async def _get_cheap(session, origin: str, month: str, one_way: bool,
-                     ret_month: str = None) -> list:
-    params = {
-        "origin": origin,
-        "depart_date": month,
-        "currency": "eur",
-        "token": TP_TOKEN,
-        "one_way": "true" if one_way else "false",
-    }
-    if not one_way and ret_month:
-        params["return_date"] = ret_month
+async def _api_get(session, url: str, params: dict) -> dict | list | None:
+    """Універсальний GET з токеном в обох місцях"""
+    params["token"] = TP_TOKEN
+    endpoint = url.split("/")[-1]
     try:
         async with session.get(
-            "https://api.travelpayouts.com/v1/prices/cheap",
-            params=params,
+            url, params=params,
             headers={"x-access-token": TP_TOKEN},
-            timeout=aiohttp.ClientTimeout(total=12),
+            timeout=aiohttp.ClientTimeout(total=15),
         ) as r:
+            logger.info(f"API [{endpoint}] origin={params.get('origin','')} → HTTP {r.status}")
             if r.status == 200:
-                d = await r.json()
-                return d.get("data", {}) if d.get("success") else {}
-    except:
-        pass
-    return {}
-
-
-async def _get_special(session, origin: str) -> list:
-    """get_special_offers — аномально низькі ціни"""
-    try:
-        async with session.get(
-            "https://api.travelpayouts.com/aviasales/v3/get_special_offers",
-            params={"origin": origin, "currency": "eur", "token": TP_TOKEN},
-            headers={"x-access-token": TP_TOKEN},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as r:
-            if r.status == 200:
-                d = await r.json()
-                return d.get("data", []) if d.get("success") else []
-    except:
-        pass
-    return []
-
-
-async def _get_directions(session, origin: str) -> list:
-    """get_popular_directions — популярні напрямки з цінами"""
-    try:
-        async with session.get(
-            "https://api.travelpayouts.com/aviasales/v3/get_popular_directions",
-            params={"origin": origin, "currency": "eur", "limit": 20, "token": TP_TOKEN},
-            headers={"x-access-token": TP_TOKEN},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as r:
-            if r.status == 200:
-                d = await r.json()
-                return d.get("data", {}).get("origin", []) if d.get("success") else []
-    except:
-        pass
-    return []
+                data = await r.json()
+                if isinstance(data, dict):
+                    count = len(data.get("data", data) or [])
+                    logger.info(f"  → {count} результатів")
+                return data
+            else:
+                text = await r.text()
+                logger.warning(f"  → Помилка: {text[:200]}")
+    except Exception as e:
+        logger.error(f"API [{endpoint}]: {e}")
+    return None
 
 
 async def fetch_origin(session, origin: str, one_way: bool,
                        flight_budget: int, region_codes: list) -> list:
-    now  = datetime.now()
+    now   = datetime.now()
     deals = []
     seen  = set()
 
     def add(dest, price, dep, ret_d, transfers, airline):
+        dest = dest.upper() if dest else ""
+        if not dest or len(dest) != 3:
+            return
         if region_codes and dest not in region_codes:
             return
         if price <= 0 or price > flight_budget:
@@ -260,54 +228,74 @@ async def fetch_origin(session, origin: str, one_way: bool,
         nights = None
         if not one_way and ret_d:
             try:
-                d1 = datetime.fromisoformat(dep.replace("Z", "+00:00"))
-                d2 = datetime.fromisoformat(ret_d.replace("Z", "+00:00"))
+                d1 = datetime.fromisoformat(dep.replace("Z","+00:00"))
+                d2 = datetime.fromisoformat(ret_d.replace("Z","+00:00"))
                 nights = (d2 - d1).days
                 if nights < 1 or nights > 7:
                     return
             except:
                 pass
-        # Запам'ятовуємо для розрахунку реальної середньої
         rk = f"{origin}-{dest}-{'ow' if one_way else 'rt'}"
         route_avg.setdefault(rk, [])
         route_avg[rk].append(price)
-
         deals.append({
             "origin": origin, "destination": dest,
             "price": price, "airline": airline or "",
-            "departure_at": dep, "return_at": ret_d,
-            "transfers": transfers, "nights": nights,
+            "departure_at": dep or "", "return_at": ret_d or "",
+            "transfers": transfers or 0, "nights": nights,
             "link": f"https://www.aviasales.com/search/{origin}{dest}",
         })
 
-    # 1. /v1/prices/cheap — кілька місяців
+    # ── 1. prices/cheap — кілька місяців ──
+    for i in range(1, 5):
+        month = (now + timedelta(days=30*i)).strftime("%Y-%m")
+        params = {"origin": origin, "depart_date": month,
+                  "currency": "eur", "one_way": "true" if one_way else "false"}
+        if not one_way:
+            params["return_date"] = (now + timedelta(days=30*i+5)).strftime("%Y-%m")
+        d = await _api_get(session, "https://api.travelpayouts.com/v1/prices/cheap", params)
+        if d and d.get("success") and d.get("data"):
+            for dest, tickets in d["data"].items():
+                for _, t in tickets.items():
+                    add(dest, t.get("price",0), t.get("departure_at",""),
+                        t.get("return_at",""), t.get("transfers",0), t.get("airline",""))
+
+    # ── 2. prices_for_dates — надійніший endpoint ──
     for i in range(1, 4):
-        month     = (now + timedelta(days=30*i)).strftime("%Y-%m")
-        ret_month = (now + timedelta(days=30*i+5)).strftime("%Y-%m")
-        data = await _get_cheap(session, origin, month,
-                                one_way, None if one_way else ret_month)
-        for dest, tickets in data.items():
-            for _, t in tickets.items():
-                add(dest, t.get("price", 0),
+        month = (now + timedelta(days=30*i)).strftime("%Y-%m")
+        params = {"origin": origin, "departure_at": month,
+                  "currency": "eur", "sorting": "price",
+                  "one_way": "true" if one_way else "false",
+                  "limit": 30, "unique": "false"}
+        if not one_way:
+            params["return_at"] = (now + timedelta(days=30*i+5)).strftime("%Y-%m")
+        d = await _api_get(session, "https://api.travelpayouts.com/aviasales/v3/prices_for_dates", params)
+        if d and d.get("success") and d.get("data"):
+            for t in d["data"]:
+                add(t.get("destination",""), t.get("price",0),
                     t.get("departure_at",""), t.get("return_at",""),
-                    t.get("transfers", 0), t.get("airline",""))
+                    t.get("number_of_changes",0), t.get("airline",""))
 
-    # 2. get_special_offers — аномальні ціни (тільки one-way)
-    if one_way:
-        specials = await _get_special(session, origin)
-        for t in specials:
-            add(t.get("destination",""),
-                t.get("price", 0),
-                t.get("departure_at",""), None, 0,
-                t.get("airline",""))
+    # ── 3. grouped_prices — топ напрямки ──
+    params = {"origin": origin, "currency": "eur", "limit": 30,
+              "one_way": "true" if one_way else "false",
+              "grouping": "DIRECTIONS"}
+    d = await _api_get(session, "https://api.travelpayouts.com/aviasales/v3/grouped_prices", params)
+    if d and d.get("success") and d.get("data"):
+        for item in d["data"]:
+            add(item.get("destination",""), item.get("price",0),
+                item.get("departure_at",""), item.get("return_at",""),
+                item.get("number_of_changes",0), item.get("airline",""))
 
-    # 3. get_popular_directions
-    dirs = await _get_directions(session, origin)
-    for t in dirs:
-        add(t.get("city_iata",""),
-            t.get("price", 0),
-            t.get("departure_at",""), t.get("return_at",""),
-            0, "")
+    # ── 4. special_offers — аномально низькі ──
+    d = await _api_get(session,
+        "https://api.travelpayouts.com/aviasales/v3/get_special_offers",
+        {"origin": origin, "currency": "eur"})
+    if d and d.get("success") and d.get("data"):
+        for t in d["data"]:
+            add(t.get("destination",""), t.get("price",0),
+                t.get("departure_at",""), t.get("return_at",""),
+                0, t.get("airline",""))
 
     return deals
 
@@ -831,10 +819,14 @@ async def check_watchlist():
         for w in watches:
             try:
                 async with aiohttp.ClientSession() as session:
-                    data = await _get_cheap(session, w["o"],
-                                            datetime.now().strftime("%Y-%m"), True)
-                    if w["d"] in data:
-                        for _, t in data[w["d"]].items():
+                    month = datetime.now().strftime("%Y-%m")
+                    d = await _api_get(session,
+                        "https://api.travelpayouts.com/aviasales/v3/prices_for_dates",
+                        {"origin": w["o"], "destination": w["d"],
+                         "departure_at": month, "currency": "eur",
+                         "one_way": "true", "sorting": "price", "limit": 5})
+                    if d and d.get("success") and d.get("data"):
+                        for t in d["data"]:
                             p = t.get("price", 0)
                             if 0 < p <= w["p"]:
                                 await bot.send_message(
@@ -846,6 +838,7 @@ async def check_watchlist():
                                     parse_mode="Markdown",
                                     disable_web_page_preview=True
                                 )
+                                break
             except Exception as e:
                 logger.error(f"watch: {e}")
             await asyncio.sleep(0.3)
