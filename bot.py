@@ -1,294 +1,518 @@
+"""
+Flight Deals Bot v8
+- Авто-пошук deals по всій Європі + екзотика
+- Режим "один аеропорт" (IAS → всюди → IAS)
+- Готель в пакеті (Booking + Hostelworld посилання)
+- FlixBus наступний місяць
+- Watchlist з алертами
+- Авто-сповіщення нових deals кожні 6 год
+- Реальна середня ціна по маршруту
+"""
+
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from collections import defaultdict
 import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import (Message, CallbackQuery,
-                           InlineKeyboardMarkup, InlineKeyboardButton, BotCommand)
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+)
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ============================================================
-# НАЛАШТУВАННЯ
-# ============================================================
+# ════════════════════════════════════════════════
+# НАЛАШТУВАННЯ — вписати свої ключі
+# ════════════════════════════════════════════════
 TELEGRAM_TOKEN = "8602308787:AAFhZMfMNCcTv-yXTDB1mouUFaOBrO_Jac8"
 TRAVELPAYOUTS_TOKEN = "83ab9d18d7fb0092294828b8104b50a5"
 
-DEFAULT_BUDGET  = 400   # €
-TOP_N           = 5     # скільки deals показувати
+DEFAULT_BUDGET = 400
+TOP_N          = 5
 
-# ============================================================
-# СЛОВНИК АЕРОПОРТІВ (повний)
-# ============================================================
-AP = {
-    # Польща
-    "WAW":"Варшава","KRK":"Краків","RZE":"Жешув","WRO":"Вроцлав",
-    "GDN":"Гданськ","KTW":"Катовіце","POZ":"Познань","SZZ":"Щецін",
-    "LUZ":"Люблін","BZG":"Бидгощ",
-    # Угорщина
-    "BUD":"Будапешт","DEB":"Дебрецен",
-    # Чехія / Словаччина
-    "PRG":"Прага","BRQ":"Брно","BTS":"Братислава","KSC":"Кошіце",
-    # Румунія — ВСІ
-    "OTP":"Бухарест","BBU":"Бухарест-Бенесе","CLJ":"Клуж-Напока",
-    "TSR":"Тімішоара","IAS":"Яси","SCV":"Сучава","BCM":"Бакеу",
-    "SBZ":"Сібіу","OMR":"Орадя","SUJ":"Сату-Маре","TGM":"Тирґу-Муреш",
-    "CRA":"Крайова","TCE":"Тулча","BAY":"Бая-Маре",
-    # Молдова
-    "RMO":"Кишинів",
-    # Балкани
-    "BEG":"Белград","INI":"Ніш","ZAG":"Загреб","SPU":"Спліт",
-    "DBV":"Дубровник","ZAD":"Задар","PUY":"Пула","RJK":"Рієка",
-    "OSI":"Осієк","SKP":"Скоп'є","OHD":"Охрид","TIA":"Тирана",
-    "TGD":"Подгориця","TIV":"Тіват",
-    "SOF":"Софія","PDV":"Пловдів","VAR":"Варна","BOJ":"Бургас",
-    # Австрія / Швейцарія
-    "VIE":"Відень","GRZ":"Грац","INN":"Інсбрук","SZG":"Зальцбург","LNZ":"Лінц",
-    "ZRH":"Цюрих","GVA":"Женева","BSL":"Базель",
-    # Німеччина
-    "MUC":"Мюнхен","FRA":"Франкфурт","BER":"Берлін","HAM":"Гамбург",
-    "DUS":"Дюссельдорф","STR":"Штутгарт","CGN":"Кельн","NUE":"Нюрнберг",
-    "LEJ":"Лейпциг","DRS":"Дрезден","BRE":"Бремен","FMM":"Меммінген",
-    "HHN":"Франкфурт-Хан","DTM":"Дортмунд","PAD":"Падерборн","ERF":"Ерфурт",
-    # Франція
-    "CDG":"Париж CDG","ORY":"Париж Орлі","LYS":"Ліон","MRS":"Марсель",
-    "NCE":"Ніцца","TLS":"Тулуза","BOD":"Бордо","NTE":"Нант",
-    "SXB":"Страсбург","MPL":"Монпельє","LIL":"Лілль","BES":"Брест",
-    "BIA":"Бастія","AJA":"Аяччо",
-    # Велика Британія / Ірландія
-    "LHR":"Лондон Хітроу","LGW":"Лондон Гетвік","STN":"Лондон Станстед",
-    "LTN":"Лондон Лутон","LCY":"Лондон Сіті","MAN":"Манчестер",
-    "BHX":"Бірмінгем","EDI":"Единбург","GLA":"Глазго","BRS":"Брістоль",
-    "NCL":"Ньюкасл","LPL":"Ліверпуль","EMA":"Іст-Мідлендс","ABZ":"Абердін",
-    "BFS":"Белфаст","DUB":"Дублін","SNN":"Шеннон","ORK":"Корк",
-    # Нідерланди / Бельгія / Люксембург
-    "AMS":"Амстердам","EIN":"Ейндговен","RTM":"Роттердам","GRQ":"Гронінген",
-    "BRU":"Брюссель","CRL":"Брюссель Шарлеруа","LGG":"Льєж","LUX":"Люксембург",
-    # Іспанія
-    "MAD":"Мадрид","BCN":"Барселона","AGP":"Малага","ALC":"Аліканте",
-    "PMI":"Пальма Майорка","IBZ":"Ібіца","VLC":"Валенсія","SVQ":"Севілья",
-    "BIO":"Більбао","SDR":"Сантандер","SCQ":"Сантьяго","OVD":"Ов'єдо",
-    "VGO":"Віго","GRX":"Гранада","MHN":"Менорка",
-    "ACE":"Ланзароте","TFS":"Тенеріфе Пд","TFN":"Тенеріфе Пн",
-    "LPA":"Гран Канарія","FUE":"Фуертевентура",
-    # Португалія
-    "LIS":"Лісабон","OPO":"Порту","FAO":"Фару","FNC":"Мадейра","PDL":"Азори",
-    # Скандинавія
-    "CPH":"Копенгаген","AAL":"Ольборг","BLL":"Більунд",
-    "ARN":"Стокгольм","NYO":"Стокгольм Скавста","GOT":"Гетеборг","MMX":"Мальме",
-    "OSL":"Осло","TRF":"Осло Торп","BGO":"Берген","SVG":"Ставангер","TRD":"Тронгейм",
-    "HEL":"Гельсінкі","TMP":"Тампере","TKU":"Турку","OUL":"Оулу","RVN":"Рованіємі",
-    "KEF":"Рейк'явік",
-    # Балтія
-    "RIX":"Рига","TLL":"Таллін","VNO":"Вільнюс","KUN":"Каунас","PLQ":"Паланга",
-    # Італія
-    "FCO":"Рим Фьюмічино","CIA":"Рим Чампіно",
-    "MXP":"Мілан Мальпенса","LIN":"Мілан Лінате","BGY":"Мілан Бергамо",
-    "VCE":"Венеція","TSF":"Тревізо","NAP":"Неаполь","BRI":"Барі",
-    "BLQ":"Болонья","FLR":"Флоренція","PSA":"Піза","VRN":"Верона",
-    "TRS":"Трієст","CAG":"Кальярі","OLB":"Ольбія","AHO":"Алгеро",
-    "CTA":"Катанія","PMO":"Палермо","PSR":"Пескара","RMI":"Ріміні",
-    # Греція / Кіпр / Мальта
-    "ATH":"Афіни","SKG":"Салоніки","HER":"Іракліон Крит",
-    "CHQ":"Ханья Крит","RHO":"Родос","KGS":"Кос","CFU":"Корфу",
-    "ZTH":"Закінф","JMK":"Міконос","JTR":"Санторіні","KLX":"Каламата",
-    "LCA":"Ларнака Кіпр","PFO":"Пафос Кіпр","MLA":"Мальта",
-    # Туреччина
-    "IST":"Стамбул","SAW":"Стамбул Сабіха","AYT":"Анталія",
-    "ADB":"Ізмір","ESB":"Анкара","DLM":"Даламан","BJV":"Бодрум",
-    # Інше
-    "TLV":"Тель-Авів",
-    # Часті destination коди без власного аеропорту
-    "STO":"Стокгольм (місто)","MIL":"Мілан (місто)","LON":"Лондон (місто)",
-    "PAR":"Париж (місто)","ROM":"Рим (місто)","BUH":"Бухарест (місто)",
-    "MOW":"Москва","LED":"Санкт-Петербург",
+# ════════════════════════════════════════════════
+# АЕРОПОРТИ
+# ════════════════════════════════════════════════
+AIRPORTS = {
+    # ── Найближчі до України ──
+    "WAW": "Варшава, Польща",
+    "KRK": "Краків, Польща",
+    "RZE": "Жешув, Польща",
+    "WRO": "Вроцлав, Польща",
+    "GDN": "Гданськ, Польща",
+    "KTW": "Катовіце, Польща",
+    "POZ": "Познань, Польща",
+    "LUZ": "Люблін, Польща",
+    "BUD": "Будапешт, Угорщина",
+    "DEB": "Дебрецен, Угорщина",
+    "PRG": "Прага, Чехія",
+    "BRQ": "Брно, Чехія",
+    "BTS": "Братислава, Словаччина",
+    "KSC": "Кошіце, Словаччина",
+    # ── Румунія — всі ──
+    "OTP": "Бухарест, Румунія",
+    "CLJ": "Клуж-Напока, Румунія",
+    "TSR": "Тімішоара, Румунія",
+    "IAS": "Яси, Румунія",
+    "SCV": "Сучава, Румунія",
+    "BCM": "Бакеу, Румунія",
+    "SBZ": "Сібіу, Румунія",
+    "OMR": "Орадя, Румунія",
+    "SUJ": "Сату-Маре, Румунія",
+    "TGM": "Тирґу-Муреш, Румунія",
+    "CRA": "Крайова, Румунія",
+    "TCE": "Тулча, Румунія",
+    # ── Молдова ──
+    "RMO": "Кишинів, Молдова",
+    # ── Балкани ──
+    "BEG": "Белград, Сербія",
+    "INI": "Ніш, Сербія",
+    "ZAG": "Загреб, Хорватія",
+    "SPU": "Спліт, Хорватія",
+    "DBV": "Дубровник, Хорватія",
+    "ZAD": "Задар, Хорватія",
+    "PUY": "Пула, Хорватія",
+    "SKP": "Скоп'є, Македонія",
+    "TIA": "Тирана, Албанія",
+    "TGD": "Подгориця, Чорногорія",
+    "TIV": "Тіват, Чорногорія",
+    "SOF": "Софія, Болгарія",
+    "VAR": "Варна, Болгарія",
+    "BOJ": "Бургас, Болгарія",
+    "PDV": "Пловдів, Болгарія",
+    # ── Центральна Європа ──
+    "VIE": "Відень, Австрія",
+    "GRZ": "Грац, Австрія",
+    "SZG": "Зальцбург, Австрія",
+    "INN": "Інсбрук, Австрія",
+    "ZRH": "Цюрих, Швейцарія",
+    "GVA": "Женева, Швейцарія",
+    "BSL": "Базель, Швейцарія",
+    # ── Німеччина ──
+    "MUC": "Мюнхен, Німеччина",
+    "FRA": "Франкфурт, Німеччина",
+    "BER": "Берлін, Німеччина",
+    "HAM": "Гамбург, Німеччина",
+    "DUS": "Дюссельдорф, Німеччина",
+    "STR": "Штутгарт, Німеччина",
+    "CGN": "Кельн, Німеччина",
+    "NUE": "Нюрнберг, Німеччина",
+    "LEJ": "Лейпциг, Німеччина",
+    "DRS": "Дрезден, Німеччина",
+    "BRE": "Бремен, Німеччина",
+    "FMM": "Меммінген, Німеччина",
+    "HHN": "Франкфурт-Хан, Німеччина",
+    "DTM": "Дортмунд, Німеччина",
+    # ── Франція ──
+    "CDG": "Париж CDG, Франція",
+    "ORY": "Париж Орлі, Франція",
+    "LYS": "Ліон, Франція",
+    "MRS": "Марсель, Франція",
+    "NCE": "Ніцца, Франція",
+    "TLS": "Тулуза, Франція",
+    "BOD": "Бордо, Франція",
+    "NTE": "Нант, Франція",
+    "SXB": "Страсбург, Франція",
+    "LIL": "Лілль, Франція",
+    # ── Британія + Ірландія ──
+    "LHR": "Лондон Хітроу, Британія",
+    "LGW": "Лондон Гетвік, Британія",
+    "STN": "Лондон Станстед, Британія",
+    "LTN": "Лондон Лутон, Британія",
+    "MAN": "Манчестер, Британія",
+    "BHX": "Бірмінгем, Британія",
+    "EDI": "Единбург, Британія",
+    "GLA": "Глазго, Британія",
+    "BRS": "Брістоль, Британія",
+    "DUB": "Дублін, Ірландія",
+    "ORK": "Корк, Ірландія",
+    # ── Нідерланди / Бельгія / Люкс ──
+    "AMS": "Амстердам, Нідерланди",
+    "EIN": "Ейндговен, Нідерланди",
+    "BRU": "Брюссель, Бельгія",
+    "CRL": "Брюссель-Шарлеруа, Бельгія",
+    "LUX": "Люксембург",
+    # ── Іспанія ──
+    "MAD": "Мадрид, Іспанія",
+    "BCN": "Барселона, Іспанія",
+    "AGP": "Малага, Іспанія",
+    "ALC": "Аліканте, Іспанія",
+    "PMI": "Пальма Майорка, Іспанія",
+    "IBZ": "Ібіца, Іспанія",
+    "VLC": "Валенсія, Іспанія",
+    "SVQ": "Севілья, Іспанія",
+    "BIO": "Більбао, Іспанія",
+    "ACE": "Ланзароте, Канари",
+    "TFS": "Тенеріфе Пд, Канари",
+    "TFN": "Тенеріфе Пн, Канари",
+    "LPA": "Гран Канарія, Канари",
+    "FUE": "Фуертевентура, Канари",
+    "GMZ": "Ла Гомера, Канари",
+    # ── Португалія + острови ──
+    "LIS": "Лісабон, Португалія",
+    "OPO": "Порту, Португалія",
+    "FAO": "Фару, Португалія",
+    "FNC": "Фуншал Мадейра, Португалія",  # ← Мадейра!
+    "PDL": "Понта-Делгада Азори, Португалія",
+    "TER": "Терсейра Азори, Португалія",
+    # ── Скандинавія ──
+    "CPH": "Копенгаген, Данія",
+    "BLL": "Більунд, Данія",
+    "ARN": "Стокгольм, Швеція",
+    "NYO": "Стокгольм-Скавста, Швеція",
+    "GOT": "Гетеборг, Швеція",
+    "MMX": "Мальме, Швеція",
+    "OSL": "Осло, Норвегія",
+    "BGO": "Берген, Норвегія",
+    "SVG": "Ставангер, Норвегія",
+    "HEL": "Гельсінкі, Фінляндія",
+    "TMP": "Тампере, Фінляндія",
+    "RVN": "Рованіємі, Фінляндія",  # ← Санта Клаус!
+    "KEF": "Рейк'явік, Ісландія",
+    # ── Балтія ──
+    "RIX": "Рига, Латвія",
+    "TLL": "Таллін, Естонія",
+    "VNO": "Вільнюс, Литва",
+    "KUN": "Каунас, Литва",
+    # ── Італія ──
+    "FCO": "Рим Фьюмічино, Італія",
+    "CIA": "Рим Чампіно, Італія",
+    "MXP": "Мілан Мальпенса, Італія",
+    "BGY": "Мілан Бергамо, Італія",
+    "VCE": "Венеція, Італія",
+    "TSF": "Тревізо, Італія",
+    "NAP": "Неаполь, Італія",
+    "BRI": "Барі, Італія",
+    "BLQ": "Болонья, Італія",
+    "FLR": "Флоренція, Італія",
+    "PSA": "Піза, Італія",
+    "VRN": "Верона, Італія",
+    "CAG": "Кальярі Сардинія, Італія",
+    "OLB": "Ольбія Сардинія, Італія",
+    "CTA": "Катанія Сицилія, Італія",
+    "PMO": "Палермо Сицилія, Італія",
+    # ── Греція + острови ──
+    "ATH": "Афіни, Греція",
+    "SKG": "Салоніки, Греція",
+    "HER": "Іракліон Крит, Греція",
+    "CHQ": "Ханья Крит, Греція",
+    "RHO": "Родос, Греція",
+    "KGS": "Кос, Греція",
+    "CFU": "Корфу, Греція",
+    "ZTH": "Закінф, Греція",
+    "JMK": "Міконос, Греція",
+    "JTR": "Санторіні, Греція",
+    "KLX": "Каламата, Греція",
+    "SMI": "Самос, Греція",
+    "MJT": "Мітіліні Лесбос, Греція",
+    # ── Кіпр + Мальта ──
+    "LCA": "Ларнака, Кіпр",
+    "PFO": "Пафос, Кіпр",
+    "MLA": "Мальта",
+    # ── Туреччина ──
+    "IST": "Стамбул, Туреччина",
+    "SAW": "Стамбул-Сабіха, Туреччина",
+    "AYT": "Анталія, Туреччина",
+    "ADB": "Ізмір, Туреччина",
+    "DLM": "Даламан, Туреччина",
+    "BJV": "Бодрум, Туреччина",
+    "GZT": "Газіантеп, Туреччина",
+    "TZX": "Трабзон, Туреччина",
+    # ── Близький Схід ──
+    "TLV": "Тель-Авів, Ізраїль",
+    "AMM": "Амман, Йорданія",
+    "BEY": "Бейрут, Ліван",
+    "DXB": "Дубай, ОАЕ",
+    "AUH": "Абу-Дабі, ОАЕ",
+    "DOH": "Доха, Катар",
+    "KWI": "Кувейт",
+    # ── Африка ──
+    "CMN": "Касабланка, Марокко",
+    "RAK": "Марракеш, Марокко",
+    "TNG": "Танжер, Марокко",
+    "AGA": "Агадір, Марокко",
+    "TUN": "Туніс, Туніс",
+    "DJE": "Джерба, Туніс",
+    "CAI": "Каїр, Єгипет",
+    "HRG": "Хургада, Єгипет",
+    "SSH": "Шарм-ель-Шейх, Єгипет",
+    "LXR": "Луксор, Єгипет",
+    "JNB": "Йоганнесбург, ПАР",
+    "CPT": "Кейптаун, ПАР",
+    "NBO": "Найробі, Кенія",
+    "MBA": "Момбаса, Кенія",
+    "ZNZ": "Занзібар, Танзанія",  # ← Екзотика!
+    "DAR": "Дар-ес-Салам, Танзанія",
+    "ADD": "Аддис-Абеба, Ефіопія",
+    "LOS": "Лагос, Нігерія",
+    "ABV": "Абуджа, Нігерія",
+    "ACC": "Аккра, Гана",
+    "DKR": "Дакар, Сенегал",
+    "RUN": "Реюньйон, Франція",  # ← Острів!
+    "MRU": "Маврикій",          # ← Рай!
+    "SEZ": "Сейшели",           # ← Мрія!
+    "TNR": "Антананаріву, Мадагаскар",
+    # ── Азія ──
+    "BKK": "Бангкок, Таїланд",
+    "HKT": "Пхукет, Таїланд",
+    "CNX": "Чіанг Маї, Таїланд",
+    "KBV": "Крабі, Таїланд",
+    "USM": "Ко Самуї, Таїланд",
+    "DPS": "Балі, Індонезія",    # ← Балі!
+    "CGK": "Джакарта, Індонезія",
+    "KUL": "Куала-Лумпур, Малайзія",
+    "PEN": "Пенанг, Малайзія",
+    "SIN": "Сінгапур",
+    "MNL": "Маніла, Філіппіни",
+    "CEB": "Себу, Філіппіни",
+    "SGN": "Хошимін, В'єтнам",
+    "HAN": "Ханой, В'єтнам",
+    "DAD": "Дананг, В'єтнам",
+    "REP": "Сіємреап Ангкор, Камбоджа",
+    "PNH": "Пномпень, Камбоджа",
+    "RGN": "Янгон, М'янма",
+    "DEL": "Делі, Індія",
+    "BOM": "Мумбаї, Індія",
+    "GOI": "Гоа, Індія",         # ← Гоа!
+    "MAA": "Ченнаї, Індія",
+    "COK": "Кочін, Індія",
+    "CMB": "Коломбо, Шрі-Ланка",
+    "MLE": "Мале, Мальдіви",     # ← Мальдіви!
+    "KTM": "Катманду, Непал",
+    "PEK": "Пекін, Китай",
+    "PVG": "Шанхай, Китай",
+    "CAN": "Гуанчжоу, Китай",
+    "HKG": "Гонконг",
+    "NRT": "Токіо Нарита, Японія",
+    "HND": "Токіо Ханеда, Японія",
+    "KIX": "Осака, Японія",
+    "ICN": "Сеул, Корея",
+    "TPE": "Тайпей, Тайвань",
+    # ── Америка ──
+    "JFK": "Нью-Йорк, США",
+    "EWR": "Нью-Йорк Ньюарк, США",
+    "LAX": "Лос-Анджелес, США",
+    "MIA": "Маямі, США",
+    "BOS": "Бостон, США",
+    "ORD": "Чикаго, США",
+    "YYZ": "Торонто, Канада",
+    "YVR": "Ванкувер, Канада",
+    "YUL": "Монреаль, Канада",
+    "GRU": "Сан-Паулу, Бразилія",
+    "GIG": "Ріо-де-Жанейро, Бразилія",
+    "EZE": "Буенос-Айрес, Аргентина",
+    "LIM": "Ліма, Перу",
+    "BOG": "Богота, Колумбія",
+    "CUN": "Канкун, Мексика",
+    "MEX": "Мехіко, Мексика",
+    "HAV": "Гавана, Куба",
+    "SJO": "Сан-Хосе, Коста-Ріка",
+    # ── Океанія ──
+    "SYD": "Сідней, Австралія",
+    "MEL": "Мельбурн, Австралія",
+    "BNE": "Брісбен, Австралія",
+    "AKL": "Окленд, Нова Зеландія",
+    "NAN": "Нанді, Фіджі",
+    "PPT": "Папеєте, Таїті",     # ← Таїті!
+    "FAA": "Папеєте Фаа'а, Поліне́зія",
+    # ── Додаткові острови / екзотика ──
+    "GPA": "Патра, Греція",
+    "HRE": "Гарare, Зімбабве",
+    "SZB": "Куала-Лумпур Субанг",
+    "FNC_": "Мадейра",
+    "SID": "Острів Сал, Кабо-Верде",  # ← Кабо-Верде!
+    "RAI": "Прая, Кабо-Верде",
+    "BVC": "Боа-Віста, Кабо-Верде",
+    "VXE": "Сан-Вісенте, Кабо-Верде",
 }
 
-def ap(code: str) -> str:
-    name = AP.get(code, "")
-    return f"{code} ({name})" if name else code
-
-# ============================================================
-# РЕГІОНИ
-# ============================================================
-REGIONS = {
-    "🌍 Всюди": [],
-    "🇷🇴 Румунія + Молдова": ["OTP","CLJ","TSR","IAS","SCV","BCM","SBZ","OMR","SUJ","TGM","CRA","TCE","RMO"],
-    "🏖 Середземномор'я": ["FCO","CIA","MXP","BGY","VCE","NAP","BLQ","FLR","PSA","CTA","PMO",
-                           "ATH","SKG","HER","RHO","KGS","CFU","ZTH","JMK","JTR",
-                           "LCA","PFO","MLA","PMI","IBZ","AGP","BCN","MAD","AYT","DLM","BJV",
-                           "SPU","DBV","TIA","TGD","TIV"],
-    "🏔 Балкани":          ["BEG","INI","ZAG","SPU","DBV","SKP","TIA","TGD","TIV","SOF","VAR","BOJ","PDV"],
-    "❄️ Скандинавія":     ["CPH","ARN","GOT","OSL","BGO","HEL","TMP","KEF","TLL","RIX","VNO"],
-    "🏰 Центр Європи":    ["VIE","PRG","BUD","ZRH","GVA","MUC","FRA","BER","BTS","KSC","BRQ"],
-    "🇬🇧 Британія+Ірл":  ["LHR","LGW","STN","LTN","MAN","EDI","GLA","BRS","DUB","ORK"],
-    "🌊 Канари":           ["ACE","TFS","TFN","LPA","FUE"],
-    "🇵🇹 Іберія":         ["MAD","BCN","AGP","VLC","PMI","LIS","OPO","FAO","SVQ"],
-    "🇮🇹 Італія":         ["FCO","CIA","MXP","BGY","VCE","NAP","BLQ","FLR","PSA","VRN","CTA","PMO"],
-}
-
-# Аеропорти вильоту
-ORIGINS = [
+# Аеропорти для авто-пошуку (тільки ті що мають достатньо рейсів)
+SEARCH_ORIGINS = [
     "WAW","KRK","RZE","WRO","GDN","KTW","POZ",
     "BUD","PRG","BTS","KSC",
-    "OTP","CLJ","TSR","IAS","SCV","BCM","SBZ",
+    "OTP","CLJ","TSR","IAS","SCV","BCM",
     "RMO",
-    "VIE","ZRH","GVA","BSL",
-    "MUC","FRA","BER","HAM","DUS","STR","CGN","NUE","LEJ","DRS","BRE","FMM","HHN","DTM",
+    "VIE","ZRH","GVA",
+    "MUC","FRA","BER","HAM","DUS","STR","CGN","NUE","BRE","FMM","HHN","DTM",
     "CDG","ORY","LYS","MRS","NCE","TLS","BOD","LIL",
     "LHR","LGW","STN","LTN","MAN","EDI","GLA","BRS","DUB",
     "AMS","EIN","BRU","CRL","LUX",
-    "FCO","MXP","VCE","NAP","BLQ","PSA","VRN","CTA",
-    "MAD","BCN","AGP","VLC","PMI","LIS","OPO",
-    "ATH","SKG","HER",
+    "FCO","MXP","BGY","VCE","NAP","BLQ","PSA","VRN","CTA",
+    "MAD","BCN","AGP","VLC","PMI","LIS","OPO","FAO","FNC",
+    "ATH","SKG","HER","RHO","CFU",
     "CPH","ARN","OSL","HEL",
     "RIX","TLL","VNO",
-    "SOF","BEG","ZAG","SPU",
-    "IST","SAW",
-    "LCA","MLA","TLV",
+    "SOF","BEG","ZAG","SPU","TIA",
+    "IST","SAW","AYT",
+    "LCA","PFO","MLA","TLV",
+    # Деякі далекі для різноманіття
+    "DXB","DOH","CMN","RAK","BKK","DPS",
 ]
 
-# ============================================================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+REGIONS = {
+    "🌍 Всюди":            [],
+    "🇷🇴 Румунія+Молдова": ["OTP","CLJ","TSR","IAS","SCV","BCM","SBZ","OMR","CRA","TCE","RMO"],
+    "🏖 Середземномор'я":  ["FCO","CIA","MXP","BGY","VCE","NAP","BLQ","FLR","PSA","CTA","PMO",
+                             "ATH","SKG","HER","RHO","KGS","CFU","ZTH","JMK","JTR",
+                             "LCA","PFO","MLA","PMI","IBZ","AGP","BCN","AYT","DLM","BJV",
+                             "SPU","DBV","TIA","TGD","TIV","TUN","DJE"],
+    "🏔 Балкани":          ["BEG","INI","ZAG","SPU","DBV","SKP","TIA","TGD","TIV","SOF","VAR","BOJ"],
+    "❄️ Скандинавія":     ["CPH","ARN","GOT","OSL","BGO","HEL","TMP","KEF","RVN"],
+    "🏰 Центр Європи":    ["VIE","PRG","BUD","ZRH","GVA","MUC","FRA","BER","BTS","BRQ"],
+    "🇬🇧 Британія+Ірл":  ["LHR","LGW","STN","LTN","MAN","EDI","GLA","DUB","ORK"],
+    "🌊 Атлантика":        ["FNC","PDL","TER","ACE","TFS","LPA","FUE","SID","RAI","BVC"],
+    "🌍 Африка+Єгипет":   ["CMN","RAK","TUN","DJE","CAI","HRG","SSH","LXR","ZNZ","MRU","SEZ"],
+    "✈️ Далеко/Азія":     ["DXB","AUH","DOH","BKK","HKT","DPS","SIN","KUL","DEL","GOI","MLE"],
+    "🌎 Америка":          ["JFK","LAX","MIA","GRU","CUN","MEX","YYZ"],
+}
 
-bot      = Bot(token=TELEGRAM_TOKEN)
-dp       = Dispatcher(storage=MemoryStorage())
-scheduler = AsyncIOScheduler()
+# ════════════════════════════════════════════════
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger(__name__)
+
+bot       = Bot(token=TELEGRAM_TOKEN)
+dp        = Dispatcher(storage=MemoryStorage())
+scheduler = AsyncIOScheduler(timezone="Europe/Bucharest")
 
 user_cfg  : dict[int, dict] = {}
 watchlist : dict[int, list] = {}
-# Кеш попередніх найкращих цін для детекції нових deals
 prev_best : dict[int, dict] = {}
-# Кеш реальних середніх цін по маршрутах (заповнюється під час пошуку)
-route_avg : dict[str, float] = {}
+route_prices: dict[str, list] = {}   # накопичуємо ціни для реальної середньої
 
 
 def cfg(cid: int) -> dict:
     if cid not in user_cfg:
         user_cfg[cid] = {
-            "budget": DEFAULT_BUDGET,
-            "region": "🌍 Всюди",
-            "one_way": True,
-            "ret": True,
-            "hotel": True,
+            "budget":   DEFAULT_BUDGET,
+            "region":   "🌍 Всюди",
+            "one_way":  True,
+            "ret":      True,
+            "hotel":    True,
+            "origin":   None,    # None = всі аеропорти, інакше конкретний
         }
     return user_cfg[cid]
 
 
-# ============================================================
-# АВІА — кілька endpoint'ів для різноманіття
-# ============================================================
+def ap(code: str) -> str:
+    name = AIRPORTS.get(code, "")
+    return f"{code} ({name})" if name else code
 
-async def _api_get(session, url: str, params: dict) -> dict | list | None:
-    """Універсальний GET з токеном в обох місцях"""
+
+def city_name(code: str) -> str:
+    """Тільки місто без країни"""
+    full = AIRPORTS.get(code, code)
+    return full.split(",")[0].strip()
+
+
+# ════════════════════════════════════════════════
+# API
+# ════════════════════════════════════════════════
+
+async def api_get(session: aiohttp.ClientSession, url: str, params: dict):
+    params = dict(params)
     params["token"] = TP_TOKEN
-    endpoint = url.split("/")[-1]
     try:
         async with session.get(
             url, params=params,
             headers={"x-access-token": TP_TOKEN},
             timeout=aiohttp.ClientTimeout(total=15),
         ) as r:
-            logger.info(f"API [{endpoint}] origin={params.get('origin','')} → HTTP {r.status}")
+            ep = url.split("/")[-1]
+            log.info(f"[{ep}] {params.get('origin','')} HTTP {r.status}")
             if r.status == 200:
                 data = await r.json()
-                if isinstance(data, dict):
-                    count = len(data.get("data", data) or [])
-                    logger.info(f"  → {count} результатів")
                 return data
-            else:
-                text = await r.text()
-                logger.warning(f"  → Помилка: {text[:200]}")
+            log.warning(f"[{ep}] Error: {await r.text()[:150]}")
     except Exception as e:
-        logger.error(f"API [{endpoint}]: {e}")
+        log.error(f"api_get {url}: {e}")
     return None
 
 
-async def fetch_origin(session, origin: str, one_way: bool,
-                       flight_budget: int, region_codes: list) -> list:
+async def fetch_from_origin(
+    session, origin: str, one_way: bool,
+    max_price: int, region_codes: list
+) -> list:
     now   = datetime.now()
     deals = []
     seen  = set()
+    markets = ["ua", "pl", "ro", "en"]  # різні ринки для більшого охоплення
 
-    def add(dest, price, dep, ret_d, transfers, airline):
-        dest = dest.upper() if dest else ""
+    def add(dest, price, dep, ret_d, stops, airline, market=""):
         if not dest or len(dest) != 3:
             return
+        dest = dest.upper()
         if region_codes and dest not in region_codes:
             return
-        if price <= 0 or price > flight_budget:
+        if price <= 0 or price > max_price:
             return
         key = f"{origin}-{dest}"
         if key in seen:
             return
         seen.add(key)
+
         nights = None
         if not one_way and ret_d:
             try:
-                d1 = datetime.fromisoformat(dep.replace("Z","+00:00"))
-                d2 = datetime.fromisoformat(ret_d.replace("Z","+00:00"))
+                d1 = datetime.fromisoformat(dep.replace("Z", "+00:00"))
+                d2 = datetime.fromisoformat(ret_d.replace("Z", "+00:00"))
                 nights = (d2 - d1).days
                 if nights < 1 or nights > 7:
                     return
             except:
                 pass
+
+        # накопичуємо для середньої ціни
         rk = f"{origin}-{dest}-{'ow' if one_way else 'rt'}"
-        route_avg.setdefault(rk, [])
-        route_avg[rk].append(price)
+        route_prices.setdefault(rk, []).append(price)
+
         deals.append({
             "origin": origin, "destination": dest,
             "price": price, "airline": airline or "",
             "departure_at": dep or "", "return_at": ret_d or "",
-            "transfers": transfers or 0, "nights": nights,
+            "transfers": stops or 0, "nights": nights,
             "link": f"https://www.aviasales.com/search/{origin}{dest}",
         })
 
-    # ── 1. prices/cheap — кілька місяців ──
-    for i in range(1, 5):
-        month = (now + timedelta(days=30*i)).strftime("%Y-%m")
-        params = {"origin": origin, "depart_date": month,
-                  "currency": "eur", "one_way": "true" if one_way else "false"}
-        if not one_way:
-            params["return_date"] = (now + timedelta(days=30*i+5)).strftime("%Y-%m")
-        d = await _api_get(session, "https://api.travelpayouts.com/v1/prices/cheap", params)
-        if d and d.get("success") and d.get("data"):
-            for dest, tickets in d["data"].items():
-                for _, t in tickets.items():
-                    add(dest, t.get("price",0), t.get("departure_at",""),
-                        t.get("return_at",""), t.get("transfers",0), t.get("airline",""))
+    # ── 1. /v1/prices/cheap — для кожного місяця і ринку ──
+    for market in markets[:2]:
+        for i in range(1, 5):
+            month = (now + timedelta(days=30*i)).strftime("%Y-%m")
+            p = {"origin": origin, "depart_date": month,
+                 "currency": "eur", "one_way": "true" if one_way else "false",
+                 "market": market}
+            if not one_way:
+                p["return_date"] = (now + timedelta(days=30*i+4)).strftime("%Y-%m")
+            d = await api_get(session, "https://api.travelpayouts.com/v1/prices/cheap", p)
+            if d and d.get("success") and d.get("data"):
+                for dest, tickets in d["data"].items():
+                    for _, t in tickets.items():
+                        add(dest, t.get("price",0), t.get("departure_at",""),
+                            t.get("return_at",""), t.get("transfers",0),
+                            t.get("airline",""), market)
 
-    # ── 2. prices_for_dates — надійніший endpoint ──
+    # ── 2. /aviasales/v3/prices_for_dates ──
     for i in range(1, 4):
         month = (now + timedelta(days=30*i)).strftime("%Y-%m")
-        params = {"origin": origin, "departure_at": month,
-                  "currency": "eur", "sorting": "price",
-                  "one_way": "true" if one_way else "false",
-                  "limit": 30, "unique": "false"}
+        p = {"origin": origin, "departure_at": month,
+             "currency": "eur", "one_way": "true" if one_way else "false",
+             "sorting": "price", "limit": 30, "unique": "false", "market": "ua"}
         if not one_way:
-            params["return_at"] = (now + timedelta(days=30*i+5)).strftime("%Y-%m")
-        d = await _api_get(session, "https://api.travelpayouts.com/aviasales/v3/prices_for_dates", params)
+            p["return_at"] = (now + timedelta(days=30*i+4)).strftime("%Y-%m")
+            p["min_trip_duration"] = 1
+            p["max_trip_duration"] = 7
+        d = await api_get(session, "https://api.travelpayouts.com/aviasales/v3/prices_for_dates", p)
         if d and d.get("success") and d.get("data"):
             for t in d["data"]:
                 add(t.get("destination",""), t.get("price",0),
                     t.get("departure_at",""), t.get("return_at",""),
                     t.get("number_of_changes",0), t.get("airline",""))
 
-    # ── 3. grouped_prices — топ напрямки ──
-    params = {"origin": origin, "currency": "eur", "limit": 30,
-              "one_way": "true" if one_way else "false",
-              "grouping": "DIRECTIONS"}
-    d = await _api_get(session, "https://api.travelpayouts.com/aviasales/v3/grouped_prices", params)
-    if d and d.get("success") and d.get("data"):
-        for item in d["data"]:
-            add(item.get("destination",""), item.get("price",0),
-                item.get("departure_at",""), item.get("return_at",""),
-                item.get("number_of_changes",0), item.get("airline",""))
-
-    # ── 4. special_offers — аномально низькі ──
-    d = await _api_get(session,
+    # ── 3. /aviasales/v3/get_special_offers — аномально дешеві ──
+    d = await api_get(session,
         "https://api.travelpayouts.com/aviasales/v3/get_special_offers",
         {"origin": origin, "currency": "eur"})
     if d and d.get("success") and d.get("data"):
@@ -300,27 +524,31 @@ async def fetch_origin(session, origin: str, one_way: bool,
     return deals
 
 
-async def search_all(one_way: bool, settings: dict) -> list:
+async def search_deals(one_way: bool, settings: dict) -> list:
     region_codes = REGIONS.get(settings["region"], [])
-    flight_budget = (int(settings["budget"] * 0.70)
-                     if settings["hotel"] and not one_way
-                     else settings["budget"])
+    max_price = (int(settings["budget"] * 0.70)
+                 if settings["hotel"] and not one_way
+                 else settings["budget"])
 
-    all_deals: list = []
+    # Якщо вибраний конкретний аеропорт — шукаємо тільки з нього
+    origins = ([settings["origin"]] if settings.get("origin")
+               else SEARCH_ORIGINS)
+
+    all_deals = []
     conn = aiohttp.TCPConnector(limit=15)
     async with aiohttp.ClientSession(connector=conn) as session:
-        for i in range(0, len(ORIGINS), 8):
-            batch   = ORIGINS[i:i+8]
-            tasks   = [fetch_origin(session, o, one_way,
-                                    flight_budget, region_codes) for o in batch]
+        for i in range(0, len(origins), 8):
+            batch = origins[i:i+8]
+            tasks = [fetch_from_origin(session, o, one_way, max_price, region_codes)
+                     for o in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for r in results:
                 if isinstance(r, list):
                     all_deals.extend(r)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
-    seen = set()
-    unique = []
+    # Дедуплікація + сортування за ціною
+    seen, unique = set(), []
     for d in sorted(all_deals, key=lambda x: x["price"]):
         k = f"{d['origin']}-{d['destination']}"
         if k not in seen:
@@ -329,42 +557,19 @@ async def search_all(one_way: bool, settings: dict) -> list:
     return unique
 
 
-# ============================================================
-# ГОТЕЛЬ — Booking.com посилання (надійно, завжди актуально)
-# ============================================================
-
-def hotel_booking_link(dest_city: str, check_in: str, check_out: str) -> str:
-    city = AP.get(dest_city, dest_city).split()[0]
-    return (f"https://www.booking.com/search.html"
-            f"?ss={city}&checkin={check_in}&checkout={check_out}"
-            f"&group_adults=1&no_rooms=1&order=price")
-
-
-def hostelworld_link(dest_city: str, check_in: str, check_out: str) -> str:
-    city = AP.get(dest_city, dest_city).split()[0]
-    return (f"https://www.hostelworld.com/findabed.php"
-            f"?ChosenCity={city}&DateFrom={check_in}&DateTo={check_out}")
-
-
-# ============================================================
-# РЕАЛЬНА СЕРЕДНЯ ЦІНА
-# ============================================================
-
-def real_avg(origin: str, dest: str, one_way: bool) -> float:
+def avg_price(origin: str, dest: str, one_way: bool) -> float:
     rk   = f"{origin}-{dest}-{'ow' if one_way else 'rt'}"
-    vals = route_avg.get(rk, [])
-    if len(vals) >= 2:
-        # прибираємо мінімум (поточна ціна) і рахуємо середню решти
-        sorted_v = sorted(vals)
-        rest = sorted_v[1:] if len(sorted_v) > 1 else sorted_v
-        return sum(rest) / len(rest)
-    # fallback — середнє по всіх зібраних цінах мінус поточна
-    return 165.0 if one_way else 230.0
+    vals = route_prices.get(rk, [])
+    if len(vals) >= 3:
+        sv = sorted(vals)
+        rest = sv[1:]  # прибираємо найдешевший (поточний)
+        return round(sum(rest) / len(rest))
+    return 160 if one_way else 250
 
 
-# ============================================================
+# ════════════════════════════════════════════════
 # ФОРМАТУВАННЯ
-# ============================================================
+# ════════════════════════════════════════════════
 
 def fmt_date(s: str) -> str:
     if not s:
@@ -378,201 +583,195 @@ def fmt_date(s: str) -> str:
         return s[:7]
 
 
-def get_check_dates(dep: str, nights: int):
+def hotel_links(dest: str, dep: str, nights: int) -> tuple[str, str, int, int]:
     try:
-        d = datetime.fromisoformat(dep.replace("Z", "+00:00"))
-        return d.strftime("%Y-%m-%d"), (d + timedelta(days=nights)).strftime("%Y-%m-%d")
+        d  = datetime.fromisoformat(dep.replace("Z", "+00:00"))
+        ci = d.strftime("%Y-%m-%d")
+        co = (d + timedelta(days=nights)).strftime("%Y-%m-%d")
     except:
-        n = datetime.now()
-        return n.strftime("%Y-%m-%d"), (n + timedelta(days=3)).strftime("%Y-%m-%d")
+        n  = datetime.now()
+        ci = n.strftime("%Y-%m-%d")
+        co = (n + timedelta(days=nights)).strftime("%Y-%m-%d")
+
+    city = city_name(dest)
+    est_hostel = nights * 18
+    est_hotel  = nights * 55
+
+    bk = (f"https://www.booking.com/search.html"
+          f"?ss={city}&checkin={ci}&checkout={co}"
+          f"&group_adults=1&no_rooms=1&order=price")
+    hw = (f"https://www.hostelworld.com/findabed.php"
+          f"?ChosenCity={city}&DateFrom={ci}&DateTo={co}")
+
+    return bk, hw, est_hostel, est_hotel
 
 
 async def fmt_deal(deal: dict, one_way: bool, settings: dict) -> str:
     price    = deal["price"]
-    avg      = real_avg(deal["origin"], deal["destination"], one_way)
+    avg      = avg_price(deal["origin"], deal["destination"], one_way)
     discount = round((avg - price) / avg * 100) if price < avg else 0
-    fire     = "🔥🔥🔥" if discount >= 40 else "🔥🔥" if discount >= 20 else "🔥" if discount > 0 else "💰"
     stops    = "прямий ✈️" if deal["transfers"] == 0 else f"{deal['transfers']} пересадка"
-    dep_d    = fmt_date(deal["departure_at"])
+    fire     = ("🔥🔥🔥" if discount >= 40 else
+                "🔥🔥"  if discount >= 20 else
+                "🔥"    if discount >  0  else "💰")
 
-    msg  = f"{fire} *{ap(deal['origin'])} → {ap(deal['destination'])}*\n"
-    msg += f"✈️ *€{price:.0f}*"
+    orig = ap(deal["origin"])
+    dest = ap(deal["destination"])
+
+    msg  = f"{fire} *{orig}* → *{dest}*\n"
+    msg += f"✈️ *€{price}*"
     if not one_way:
         msg += " туди-назад"
-    msg += f" | {stops}"
+    msg += f"  |  {stops}"
     if deal["airline"]:
-        msg += f" | {deal['airline']}"
+        msg += f"  |  {deal['airline']}"
     msg += "\n"
-    msg += f"📊 Середня ~€{avg:.0f} | "
-    msg += f"*дешевше на {discount}%*\n" if discount > 0 else "нова ціна\n"
-    msg += f"📅 {dep_d}"
 
+    if discount > 0:
+        msg += f"📊 Середня ~€{avg}  →  дешевше на *{discount}%*\n"
+    else:
+        msg += f"📊 Середня ~€{avg}\n"
+
+    dep_d = fmt_date(deal["departure_at"])
+    msg  += f"📅 {dep_d}"
     if not one_way and deal.get("return_at"):
-        ret_d = fmt_date(deal["return_at"])
-        n_str = f" · {deal['nights']} н." if deal.get("nights") else ""
-        msg  += f" — {ret_d}{n_str}"
+        ret_d  = fmt_date(deal["return_at"])
+        n_str  = f" · {deal['nights']} н." if deal.get("nights") else ""
+        msg   += f" — {ret_d}{n_str}"
     msg += "\n"
 
     # Готель
     if not one_way and settings["hotel"] and deal.get("nights") and deal.get("departure_at"):
-        nights   = deal["nights"]
-        ci, co   = get_check_dates(deal["departure_at"], nights)
-        dest     = deal["destination"]
-        max_h    = settings["budget"] - price
-        total    = price  # буде оновлено
+        nights = deal["nights"]
+        bk, hw, est_h, est_H = hotel_links(deal["destination"],
+                                            deal["departure_at"], nights)
+        budget = settings["budget"]
+        tot_h  = price + est_h
+        tot_H  = price + est_H
+        ok_h   = "✅" if tot_h <= budget else "⚠️ дорого"
+        ok_H   = "✅" if tot_H <= budget else "⚠️ дорого"
 
-        # Оціночна ціна готелю (хостел ~15-25€/ніч, готель ~40-80€/ніч)
-        est_hostel = round(nights * 18)
-        est_hotel  = round(nights * 55)
+        msg += f"🏨 *{nights} ночей:*\n"
+        msg += (f"  🛏 [Хостел ~€{est_h}]({hw}) → разом *€{tot_h}* {ok_h}\n"
+                f"  🏩 [Готель ~€{est_H}]({bk}) → разом *€{tot_H}* {ok_H}\n")
 
-        bk_link  = hotel_booking_link(dest, ci, co)
-        hw_link  = hostelworld_link(dest, ci, co)
-
-        msg += f"🏨 *Проживання {nights} н.:*\n"
-        msg += f"  🛏 [Хостел ~€{est_hostel}]({hw_link}) | [Готель ~€{est_hotel}]({bk_link})\n"
-
-        est_total_h = price + est_hostel
-        est_total_H = price + est_hotel
-        ok_h = "✅" if est_total_h <= settings["budget"] else "⚠️"
-        ok_H = "✅" if est_total_H <= settings["budget"] else "⚠️"
-
-        msg += f"💰 Разом хостел *~€{est_total_h}* {ok_h} | готель *~€{est_total_H}* {ok_H}"
-        msg += f" / бюджет €{settings['budget']}\n"
-
-    msg += f"🔗 [Aviasales]({deal['link']})\n\n"
+    msg += f"🔗 [Дивитись на Aviasales]({deal['link']})\n\n"
     return msg
 
 
-async def fmt_section(deals: list, one_way: bool, settings: dict) -> str:
-    label = "🛫 *В ОДИН БІК*" if one_way else "🔄 *ТУДИ І НАЗАД* (до 7 н.)"
-    h_note = " + 🏨" if (not one_way and settings["hotel"]) else ""
-    msg  = f"━━━━━━━━━━━━━━━━━━━━\n{label}{h_note}\n━━━━━━━━━━━━━━━━━━━━\n\n"
-    if not deals:
-        return msg + "😔 Немає даних зараз — спробуй пізніше\n\n"
-    count = 0
-    for deal in deals:
-        if count >= TOP_N:
-            break
-        msg += await fmt_deal(deal, one_way, settings)
-        count += 1
-    return msg
-
-
-async def run_search(chat_id: int) -> str:
-    s      = cfg(chat_id)
-    tasks  = []
-    flags  = []
-    if s["one_way"]:
-        tasks.append(search_all(True,  s)); flags.append(True)
-    if s["ret"]:
-        tasks.append(search_all(False, s)); flags.append(False)
+async def build_message(settings: dict) -> str:
+    tasks, flags = [], []
+    if settings["one_way"]:
+        tasks.append(search_deals(True,  settings)); flags.append(True)
+    if settings["ret"]:
+        tasks.append(search_deals(False, settings)); flags.append(False)
 
     results = await asyncio.gather(*tasks)
+
+    origin_label = (f"з {ap(settings['origin'])}"
+                    if settings.get("origin") else f"{len(SEARCH_ORIGINS)} аеропортів")
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    h_status = "✅" if s["hotel"] else "❌"
-    msg  = f"✈️ *FLIGHT DEALS* — {now}\n"
-    msg += f"💶 Бюджет €{s['budget']} | 🌍 {s['region']} | 🏨 {h_status}\n\n"
-    for flag, deals in zip(flags, results):
-        msg += await fmt_section(deals, flag, s)
-    msg += "💡 _Дані з Aviasales — ціни змінюються швидко!_"
+    h   = "✅" if settings["hotel"] else "❌"
 
-    # Зберігаємо для детекції нових deals
-    new_best = {}
+    txt  = f"✈️ *FLIGHT DEALS* — {now}\n"
+    txt += f"🔍 {origin_label} | 💶 €{settings['budget']} | {settings['region']} | 🏨{h}\n\n"
+
     for flag, deals in zip(flags, results):
+        label  = "🛫 *В ОДИН БІК*" if flag else "🔄 *ТУДИ І НАЗАД* (до 7 н.)"
+        h_note = " + 🏨" if (not flag and settings["hotel"]) else ""
+        txt   += f"━━━━━━━━━━━━━━━━━━━━\n{label}{h_note}\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        if not deals:
+            txt += "😔 Немає даних — API кеш порожній\n\n"
+            continue
+
+        count = 0
+        for deal in deals:
+            if count >= TOP_N:
+                break
+            txt += await fmt_deal(deal, flag, settings)
+            count += 1
+
+        # Зберігаємо для детекції нових deals
         k = "ow" if flag else "rt"
-        if deals:
-            new_best[k] = deals[0]["price"]
-    prev_best[chat_id] = new_best
+        prev_best.setdefault(settings.get("_cid", 0), {})[k] = deals[0]["price"]
 
-    return msg
+    txt += "💡 _Ціни змінюються — бронюй швидко!_"
+    return txt
 
 
-# ============================================================
-# FLIXBUS — посилання на наступний місяць
-# ============================================================
+# ════════════════════════════════════════════════
+# FLIXBUS
+# ════════════════════════════════════════════════
 
-def flixbus_msg() -> str:
-    now      = datetime.now()
-    nxt      = now.month % 12 + 1
-    yr       = now.year + (1 if nxt == 1 else 0)
-    first    = f"01.{nxt:02d}.{yr}"
-    m_ua     = ["","Січень","Лютий","Березень","Квітень","Травень","Червень",
-                "Липень","Серпень","Вересень","Жовтень","Листопад","Грудень"]
+def flixbus_message() -> str:
+    now  = datetime.now()
+    nxt  = now.month % 12 + 1
+    yr   = now.year + (1 if nxt == 1 else 0)
+    date = f"01.{nxt:02d}.{yr}"
+    mn   = ["","Січень","Лютий","Березень","Квітень","Травень","Червень",
+            "Липень","Серпень","Вересень","Жовтень","Листопад","Грудень"]
 
     routes = [
-        ("Краків","Варшава",      "28","88"),
-        ("Краків","Відень",       "28","1"),
-        ("Краків","Берлін",       "28","2"),
-        ("Краків","Прага",        "28","76"),
-        ("Варшава","Берлін",      "88","2"),
-        ("Варшава","Прага",       "88","76"),
-        ("Варшава","Будапешт",    "88","26"),
-        ("Варшава","Відень",      "88","1"),
-        ("Будапешт","Відень",     "26","1"),
-        ("Будапешт","Братислава", "26","78"),
-        ("Будапешт","Загреб",     "26","162"),
-        ("Відень","Прага",        "1","76"),
-        ("Відень","Братислава",   "1","78"),
-        ("Відень","Загреб",       "1","162"),
-        ("Прага","Братислава",    "76","78"),
-        ("Берлін","Амстердам",    "2","57"),
-        ("Берлін","Гамбург",      "2","23"),
-        ("Бухарест","Клуж",       "395","393"),
-        ("Бухарест","Яси",        "395","396"),
-        ("Кишинів","Бухарест",    "400","395"),
-        ("Яси","Бухарест",        "396","395"),
-        ("Яси","Клуж",            "396","393"),
-        ("Белград","Загреб",      "389","162"),
-        ("Белград","Будапешт",    "389","26"),
-        ("Лісабон","Мадрид",      "45","17"),
-        ("Барселона","Мадрид",    "22","17"),
-        ("Мілан","Рим",           "7","82"),
-        ("Мілан","Флоренція",     "7","96"),
-        ("Париж","Ліон",          "13","30"),
-        ("Амстердам","Брюссель",  "57","25"),
+        ("Жешув","Варшава","1292","88"),     ("Краків","Варшава","28","88"),
+        ("Краків","Відень","28","1"),         ("Краків","Берлін","28","2"),
+        ("Краків","Прага","28","76"),         ("Варшава","Берлін","88","2"),
+        ("Варшава","Прага","88","76"),        ("Варшава","Будапешт","88","26"),
+        ("Варшава","Відень","88","1"),        ("Будапешт","Відень","26","1"),
+        ("Будапешт","Загреб","26","162"),     ("Будапешт","Братислава","26","78"),
+        ("Відень","Прага","1","76"),          ("Відень","Загреб","1","162"),
+        ("Берлін","Амстердам","2","57"),      ("Берлін","Варшава","2","88"),
+        ("Прага","Братислава","76","78"),     ("Бухарест","Клуж","395","393"),
+        ("Бухарест","Яси","395","396"),       ("Кишинів","Бухарест","400","395"),
+        ("Яси","Бухарест","396","395"),       ("Яси","Клуж","396","393"),
+        ("Белград","Загреб","389","162"),     ("Белград","Будапешт","389","26"),
+        ("Лісабон","Мадрид","45","17"),       ("Барселона","Мадрид","22","17"),
+        ("Мілан","Рим","7","82"),             ("Мілан","Флоренція","7","96"),
+        ("Париж","Ліон","13","30"),           ("Амстердам","Брюссель","57","25"),
     ]
 
-    msg  = f"🚌 *FlixBus — {m_ua[nxt]} {yr}*\n"
-    msg += f"Найдешевші маршрути на наступний місяць:\n\n"
-    for fr, to, fid, tid in routes:
-        url = (f"https://shop.global.flixbus.com/s?"
-               f"departureCity={fid}&arrivalCity={tid}"
-               f"&rideDate={first}&adult=1&currency=EUR")
+    msg  = f"🚌 *FlixBus — {mn[nxt]} {yr}*\n\n"
+    for fr, to, fi, ti in routes:
+        url  = (f"https://shop.global.flixbus.com/s?"
+                f"departureCity={fi}&arrivalCity={ti}"
+                f"&rideDate={date}&adult=1&currency=EUR")
         msg += f"🚌 [{fr} → {to}]({url})\n"
-    msg += f"\n🔍 [Пошук всіх маршрутів FlixBus](https://www.flixbus.com/bus-routes)\n"
-    msg += f"\n💡 _Натисни щоб перевірити ціни на {m_ua[nxt]} {yr}_"
+    msg += f"\n🔍 [Всі маршрути FlixBus](https://www.flixbus.com/bus-routes)\n"
+    msg += f"💡 _Натисни — перевіриш ціни на {mn[nxt]} {yr}_"
     return msg
 
 
-# ============================================================
+# ════════════════════════════════════════════════
 # КЛАВІАТУРИ
-# ============================================================
+# ════════════════════════════════════════════════
 
 def kb_main(cid: int) -> InlineKeyboardMarkup:
-    s = cfg(cid)
-    h = "🏨 ВКЛ" if s["hotel"] else "🏨 ВИКЛ"
+    s   = cfg(cid)
+    h   = "🏨 ВКЛ ✅" if s["hotel"] else "🏨 ВИКЛ ❌"
+    org = f"📍 {s['origin']}" if s.get("origin") else "📍 Всі аеропорти"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✈️ Шукати deals зараз", callback_data="search")],
-        [InlineKeyboardButton(text="🚌 FlixBus наступний місяць", callback_data="flixbus")],
-        [InlineKeyboardButton(text="💶 Бюджет", callback_data="m_budget"),
-         InlineKeyboardButton(text="🌍 Регіон", callback_data="m_region")],
-        [InlineKeyboardButton(text=h, callback_data="toggle_hotel"),
-         InlineKeyboardButton(text="🛫 Тип рейсу", callback_data="m_type")],
-        [InlineKeyboardButton(text="⭐ Watchlist", callback_data="m_watch")],
+        [InlineKeyboardButton(text="✈️ Шукати deals",        callback_data="search")],
+        [InlineKeyboardButton(text="🚌 FlixBus наст. місяць", callback_data="flixbus")],
+        [InlineKeyboardButton(text="💶 Бюджет",              callback_data="m_budget"),
+         InlineKeyboardButton(text="🌍 Регіон",              callback_data="m_region")],
+        [InlineKeyboardButton(text=h,                        callback_data="tog_hotel"),
+         InlineKeyboardButton(text="🛫 Тип рейсу",          callback_data="m_type")],
+        [InlineKeyboardButton(text=org,                      callback_data="m_origin")],
+        [InlineKeyboardButton(text="⭐ Watchlist",            callback_data="m_watch")],
     ])
 
 
 def kb_budget() -> InlineKeyboardMarkup:
-    bs = [100,150,200,300,400,500]
+    bs = [100, 150, 200, 300, 400, 500, 700, 1000]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"€{b}", callback_data=f"b_{b}") for b in bs[:3]],
-        [InlineKeyboardButton(text=f"€{b}", callback_data=f"b_{b}") for b in bs[3:]],
+        [InlineKeyboardButton(text=f"€{b}", callback_data=f"b_{b}") for b in bs[:4]],
+        [InlineKeyboardButton(text=f"€{b}", callback_data=f"b_{b}") for b in bs[4:]],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
     ])
 
 
 def kb_region() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=r, callback_data=f"r_{i}")]
+    rows = [[InlineKeyboardButton(text=r, callback_data=f"reg_{i}")]
             for i, r in enumerate(REGIONS)]
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -581,12 +780,42 @@ def kb_region() -> InlineKeyboardMarkup:
 def kb_type(cid: int) -> InlineKeyboardMarkup:
     s = cfg(cid)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{'✅' if s['one_way'] else '☐'} В один бік",
-                              callback_data="tog_ow")],
-        [InlineKeyboardButton(text=f"{'✅' if s['ret'] else '☐'} Туди-назад",
-                              callback_data="tog_rt")],
+        [InlineKeyboardButton(
+            text=f"{'✅' if s['one_way'] else '☐'} В один бік",
+            callback_data="tog_ow")],
+        [InlineKeyboardButton(
+            text=f"{'✅' if s['ret'] else '☐'} Туди-назад",
+            callback_data="tog_rt")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back")],
     ])
+
+
+def kb_origin_page(page: int = 0) -> InlineKeyboardMarkup:
+    """Вибір аеропорту вильоту — по 8 на сторінку"""
+    all_ap  = sorted(AIRPORTS.items(), key=lambda x: x[1])
+    ps      = 8
+    total   = len(all_ap)
+    start   = page * ps
+    end     = min(start + ps, total)
+    rows    = []
+
+    for code, name in all_ap[start:end]:
+        rows.append([InlineKeyboardButton(
+            text=f"{code} — {name.split(',')[0]}",
+            callback_data=f"orig_{code}"
+        )])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"orig_p_{page-1}"))
+    nav.append(InlineKeyboardButton(
+        text=f"{page+1}/{(total-1)//ps+1}", callback_data="noop"))
+    if end < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"orig_p_{page+1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🌍 Всі аеропорти (скинути)", callback_data="orig_all")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_watch(cid: int) -> InlineKeyboardMarkup:
@@ -595,29 +824,28 @@ def kb_watch(cid: int) -> InlineKeyboardMarkup:
                 text=f"🗑 {w['o']}→{w['d']} <€{w['p']}",
                 callback_data=f"uw_{i}")]
             for i, w in enumerate(ws)]
-    rows.append([InlineKeyboardButton(text="📝 /watch KRK LCA 60", callback_data="noop")])
+    rows.append([InlineKeyboardButton(text="➕ Команда: /watch KRK LCA 60", callback_data="noop")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# ============================================================
+# ════════════════════════════════════════════════
 # ХЕНДЛЕРИ
-# ============================================================
+# ════════════════════════════════════════════════
 
 @dp.message(Command("start"))
 async def on_start(m: Message):
     cfg(m.chat.id)
     await m.answer(
-        "👋 *Flight + Hotel Deals Bot* ✈️🏨\n\n"
-        f"Пошук по *{len(ORIGINS)} аеропортах Європи*\n"
-        "3 джерела даних: cheap prices, special offers, popular directions\n\n"
-        "🛫 One-way / 🔄 Return до 7 ночей\n"
-        "🏨 Оцінка готелю + посилання (Booking / Hostelworld)\n"
-        "📊 Реальна середня ціна маршруту\n"
+        "✈️ *Flight Deals Bot v8*\n\n"
+        f"Пошук по *{len(SEARCH_ORIGINS)} аеропортах* Європи + Африка + Азія + Америка\n\n"
+        "🛫 One-way і 🔄 Return до 7 ночей\n"
+        "🏨 Готель в пакеті (Booking + Hostelworld)\n"
+        "📍 Режим одного аеропорту (Яси→всюди→Яси)\n"
         "🚌 FlixBus наступний місяць\n"
-        "⭐ Watchlist — алерти при зниженні ціни\n"
-        "🔔 Авто-сповіщення якщо з'явились нові deals\n\n"
-        "👇",
+        "⭐ Watchlist + авто-алерти\n"
+        "🔔 Сповіщення нових deals кожні 6 год\n\n"
+        "👇 Меню:",
         parse_mode="Markdown",
         reply_markup=kb_main(m.chat.id)
     )
@@ -625,10 +853,11 @@ async def on_start(m: Message):
 
 @dp.message(Command("deals"))
 async def on_deals(m: Message):
-    w = await m.answer("🔍 Шукаю (~40 сек)...")
-    txt = await run_search(m.chat.id)
+    s = cfg(m.chat.id)
+    s["_cid"] = m.chat.id
+    w = await m.answer("🔍 Шукаю deals... (~40 сек)")
+    txt = await build_message(s)
     await w.delete()
-    # Розбиваємо якщо > 4096 символів
     for chunk in [txt[i:i+4000] for i in range(0, len(txt), 4000)]:
         await m.answer(chunk, parse_mode="Markdown",
                        disable_web_page_preview=True,
@@ -637,7 +866,7 @@ async def on_deals(m: Message):
 
 @dp.message(Command("flixbus"))
 async def on_flixbus(m: Message):
-    await m.answer(flixbus_msg(), parse_mode="Markdown",
+    await m.answer(flixbus_message(), parse_mode="Markdown",
                    disable_web_page_preview=True)
 
 
@@ -645,38 +874,74 @@ async def on_flixbus(m: Message):
 async def on_watch(m: Message):
     p = m.text.split()
     if len(p) < 3:
-        await m.answer("Формат: `/watch KRK LCA 60`", parse_mode="Markdown")
+        await m.answer(
+            "⭐ *Watchlist*\n\nФормат: `/watch ЗВІДКИ КУДИ ЦІНА`\n"
+            "Приклад: `/watch IAS LCA 70`\n"
+            "Бот сповістить коли ціна впаде нижче вказаної!",
+            parse_mode="Markdown")
         return
-    o, d = p[1].upper(), p[2].upper()
-    threshold = int(p[3]) if len(p) > 3 else 80
-    cid = m.chat.id
+    o, d   = p[1].upper(), p[2].upper()
+    thresh = int(p[3]) if len(p) > 3 and p[3].isdigit() else 80
+    cid    = m.chat.id
     watchlist.setdefault(cid, [])
     for w in watchlist[cid]:
         if w["o"] == o and w["d"] == d:
-            await m.answer("ℹ️ Вже є у watchlist"); return
-    watchlist[cid].append({"o": o, "d": d, "p": threshold})
-    await m.answer(f"⭐ Додано: *{ap(o)} → {ap(d)}* < €{threshold}",
-                   parse_mode="Markdown")
+            await m.answer("ℹ️ Вже є у watchlist!")
+            return
+    watchlist[cid].append({"o": o, "d": d, "p": thresh})
+    await m.answer(
+        f"⭐ Додано!\n*{ap(o)} → {ap(d)}*\n"
+        f"Алерт коли ціна < *€{thresh}*",
+        parse_mode="Markdown")
+
+
+@dp.message(Command("airport"))
+async def on_airport(m: Message):
+    """Пошук аеропорту за назвою міста"""
+    q = m.text.replace("/airport", "").strip().lower()
+    if not q:
+        await m.answer("Формат: `/airport Яси` або `/airport milan`",
+                       parse_mode="Markdown")
+        return
+    found = [(k, v) for k, v in AIRPORTS.items()
+             if q in v.lower() or q in k.lower()]
+    if not found:
+        await m.answer(f"Не знайдено: {q}")
+        return
+    txt = "🔍 *Знайдені аеропорти:*\n\n"
+    for code, name in found[:10]:
+        txt += f"• `{code}` — {name}\n"
+    txt += "\nВикористай код для: `/watch IAS LCA 50`"
+    await m.answer(txt, parse_mode="Markdown")
 
 
 @dp.message(Command("help"))
 async def on_help(m: Message):
     await m.answer(
-        "📋 *Команди:*\n"
-        "/start — меню\n/deals — пошук\n"
-        "/flixbus — автобуси\n"
-        "/watch KRK LCA 60 — watchlist\n/help — довідка",
-        parse_mode="Markdown"
-    )
+        "📋 *Команди:*\n\n"
+        "/start — головне меню\n"
+        "/deals — пошук deals зараз\n"
+        "/flixbus — автобуси наступний місяць\n"
+        "/watch IAS LCA 70 — watchlist\n"
+        "/airport Яси — знайти код аеропорту\n"
+        "/help — довідка\n\n"
+        "📍 *Режим одного аеропорту:*\n"
+        "Меню → 📍 Всі аеропорти → вибери свій\n"
+        "Бот шукатиме тільки звідти і туди\n\n"
+        "🕘 Авто-deals щодня о 9:00\n"
+        "🔔 Алерти нових deals кожні 6 год",
+        parse_mode="Markdown")
 
 
-# ── Callback ──
+# ── Callbacks ──
 
 @dp.callback_query(F.data == "search")
 async def cb_search(cb: CallbackQuery):
     await cb.answer()
-    w = await cb.message.answer("🔍 Шукаю (~40 сек)...")
-    txt = await run_search(cb.message.chat.id)
+    s = cfg(cb.message.chat.id)
+    s["_cid"] = cb.message.chat.id
+    w = await cb.message.answer("🔍 Шукаю deals... (~40 сек)")
+    txt = await build_message(s)
     await w.delete()
     for chunk in [txt[i:i+4000] for i in range(0, len(txt), 4000)]:
         await cb.message.answer(chunk, parse_mode="Markdown",
@@ -687,7 +952,7 @@ async def cb_search(cb: CallbackQuery):
 @dp.callback_query(F.data == "flixbus")
 async def cb_flixbus(cb: CallbackQuery):
     await cb.answer()
-    await cb.message.answer(flixbus_msg(), parse_mode="Markdown",
+    await cb.message.answer(flixbus_message(), parse_mode="Markdown",
                              disable_web_page_preview=True)
 
 
@@ -695,11 +960,15 @@ async def cb_flixbus(cb: CallbackQuery):
 async def cb_back(cb: CallbackQuery):
     await cb.answer()
     s = cfg(cb.message.chat.id)
+    org = ap(s["origin"]) if s.get("origin") else "всі аеропорти"
     await cb.message.edit_text(
-        f"⚙️ Бюджет: €{s['budget']} | Регіон: {s['region']}\n"
+        f"⚙️ *Налаштування:*\n"
+        f"💶 Бюджет: €{s['budget']} | Регіон: {s['region']}\n"
         f"🏨 Готель: {'✅' if s['hotel'] else '❌'} | "
         f"One-way: {'✅' if s['one_way'] else '❌'} | "
-        f"Return: {'✅' if s['ret'] else '❌'}",
+        f"Return: {'✅' if s['ret'] else '❌'}\n"
+        f"📍 Аеропорт: {org}",
+        parse_mode="Markdown",
         reply_markup=kb_main(cb.message.chat.id)
     )
 
@@ -707,43 +976,45 @@ async def cb_back(cb: CallbackQuery):
 @dp.callback_query(F.data == "m_budget")
 async def cb_m_budget(cb: CallbackQuery):
     await cb.answer()
-    await cb.message.edit_text("💶 Вибери загальний бюджет (квиток + готель):",
-                                reply_markup=kb_budget())
+    await cb.message.edit_text(
+        "💶 *Загальний бюджет* (квиток + готель):",
+        parse_mode="Markdown", reply_markup=kb_budget())
 
 
 @dp.callback_query(F.data.startswith("b_"))
 async def cb_budget(cb: CallbackQuery):
     b = int(cb.data[2:])
     cfg(cb.message.chat.id)["budget"] = b
-    await cb.answer(f"✅ €{b}")
-    await cb.message.edit_text(f"✅ Бюджет: €{b}",
+    await cb.answer(f"✅ Бюджет: €{b}")
+    await cb.message.edit_text(f"✅ Бюджет встановлено: *€{b}*",
+                                parse_mode="Markdown",
                                 reply_markup=kb_main(cb.message.chat.id))
 
 
 @dp.callback_query(F.data == "m_region")
 async def cb_m_region(cb: CallbackQuery):
     await cb.answer()
-    await cb.message.edit_text("🌍 Вибери регіон призначення:",
-                                reply_markup=kb_region())
+    await cb.message.edit_text("🌍 *Регіон призначення:*",
+                                parse_mode="Markdown", reply_markup=kb_region())
 
 
-@dp.callback_query(F.data.startswith("r_"))
+@dp.callback_query(F.data.startswith("reg_"))
 async def cb_region(cb: CallbackQuery):
-    idx = int(cb.data[2:])
+    idx    = int(cb.data[4:])
     region = list(REGIONS.keys())[idx]
     cfg(cb.message.chat.id)["region"] = region
     await cb.answer(f"✅ {region}")
-    await cb.message.edit_text(f"✅ Регіон: {region}",
+    await cb.message.edit_text(f"✅ Регіон: *{region}*",
+                                parse_mode="Markdown",
                                 reply_markup=kb_main(cb.message.chat.id))
 
 
-@dp.callback_query(F.data == "toggle_hotel")
-async def cb_toggle_hotel(cb: CallbackQuery):
+@dp.callback_query(F.data == "tog_hotel")
+async def cb_tog_hotel(cb: CallbackQuery):
     s = cfg(cb.message.chat.id)
     s["hotel"] = not s["hotel"]
     status = "увімкнено ✅" if s["hotel"] else "вимкнено ❌"
-    await cb.answer(f"🏨 Готель {status}")
-    # Перемальовуємо клавіатуру з новим станом
+    await cb.answer(f"🏨 {status}")
     try:
         await cb.message.edit_reply_markup(reply_markup=kb_main(cb.message.chat.id))
     except:
@@ -754,7 +1025,9 @@ async def cb_toggle_hotel(cb: CallbackQuery):
 @dp.callback_query(F.data == "m_type")
 async def cb_m_type(cb: CallbackQuery):
     await cb.answer()
-    await cb.message.edit_text("🛫 Тип рейсу:", reply_markup=kb_type(cb.message.chat.id))
+    await cb.message.edit_text("🛫 *Тип рейсу:*",
+                                parse_mode="Markdown",
+                                reply_markup=kb_type(cb.message.chat.id))
 
 
 @dp.callback_query(F.data == "tog_ow")
@@ -773,20 +1046,61 @@ async def cb_tog_rt(cb: CallbackQuery):
     await cb.message.edit_reply_markup(reply_markup=kb_type(cb.message.chat.id))
 
 
+@dp.callback_query(F.data == "m_origin")
+async def cb_m_origin(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.edit_text(
+        "📍 *Вибери аеропорт вильоту:*\n"
+        "_Бот шукатиме тільки з нього і назад в нього_",
+        parse_mode="Markdown",
+        reply_markup=kb_origin_page(0))
+
+
+@dp.callback_query(F.data.startswith("orig_p_"))
+async def cb_orig_page(cb: CallbackQuery):
+    page = int(cb.data[7:])
+    await cb.answer()
+    await cb.message.edit_reply_markup(reply_markup=kb_origin_page(page))
+
+
+@dp.callback_query(F.data.startswith("orig_") & ~F.data.startswith("orig_p_") & ~F.data.startswith("orig_all"))
+async def cb_orig_select(cb: CallbackQuery):
+    code = cb.data[5:]
+    s    = cfg(cb.message.chat.id)
+    s["origin"] = code
+    name = AIRPORTS.get(code, code)
+    await cb.answer(f"✅ {code}")
+    await cb.message.edit_text(
+        f"📍 Вибрано: *{code}* — {name}\n\n"
+        f"Тепер бот шукає тільки рейси *з {code}* і *назад в {code}*\n"
+        f"_(наприклад: IAS → Мілан → Мадейра → Мілан → IAS)_",
+        parse_mode="Markdown",
+        reply_markup=kb_main(cb.message.chat.id))
+
+
+@dp.callback_query(F.data == "orig_all")
+async def cb_orig_all(cb: CallbackQuery):
+    cfg(cb.message.chat.id)["origin"] = None
+    await cb.answer("✅ Всі аеропорти")
+    await cb.message.edit_text("✅ Пошук по всіх аеропортах",
+                                reply_markup=kb_main(cb.message.chat.id))
+
+
 @dp.callback_query(F.data == "m_watch")
 async def cb_m_watch(cb: CallbackQuery):
     await cb.answer()
     ws  = watchlist.get(cb.message.chat.id, [])
     txt = "⭐ *Watchlist*\n\n"
-    txt += "\n".join(f"• {ap(w['o'])} → {ap(w['d'])} < €{w['p']}" for w in ws) if ws \
-           else "_Порожньо._\nДодай: `/watch KRK LCA 60`"
+    txt += ("\n".join(f"• {ap(w['o'])} → {ap(w['d'])} — до *€{w['p']}*"
+                      for w in ws)
+            if ws else "_Порожньо._\nДодай: `/watch IAS LCA 60`")
     await cb.message.edit_text(txt, parse_mode="Markdown",
                                 reply_markup=kb_watch(cb.message.chat.id))
 
 
 @dp.callback_query(F.data.startswith("uw_"))
 async def cb_uw(cb: CallbackQuery):
-    i = int(cb.data[3:])
+    i   = int(cb.data[3:])
     cid = cb.message.chat.id
     if cid in watchlist and i < len(watchlist[cid]):
         watchlist[cid].pop(i)
@@ -798,108 +1112,117 @@ async def cb_uw(cb: CallbackQuery):
 async def cb_noop(cb: CallbackQuery): await cb.answer()
 
 
-# ============================================================
+# ════════════════════════════════════════════════
 # ФОНОВІ ЗАДАЧІ
-# ============================================================
+# ════════════════════════════════════════════════
 
-async def daily_deals():
+async def task_daily():
+    """Щоденна розсилка о 9:00"""
     for cid in list(user_cfg):
         try:
-            txt = await run_search(cid)
+            s       = cfg(cid)
+            s["_cid"] = cid
+            txt     = await build_message(s)
             for chunk in [txt[i:i+4000] for i in range(0, len(txt), 4000)]:
                 await bot.send_message(cid, chunk, parse_mode="Markdown",
                                        disable_web_page_preview=True,
                                        reply_markup=kb_main(cid))
         except Exception as e:
-            logger.error(f"daily: {e}")
+            log.error(f"daily {cid}: {e}")
 
 
-async def check_watchlist():
+async def task_watchlist():
+    """Перевірка watchlist кожні 3 год"""
     for cid, watches in list(watchlist.items()):
         for w in watches:
             try:
+                now = datetime.now()
                 async with aiohttp.ClientSession() as session:
-                    month = datetime.now().strftime("%Y-%m")
-                    d = await _api_get(session,
-                        "https://api.travelpayouts.com/aviasales/v3/prices_for_dates",
-                        {"origin": w["o"], "destination": w["d"],
-                         "departure_at": month, "currency": "eur",
-                         "one_way": "true", "sorting": "price", "limit": 5})
-                    if d and d.get("success") and d.get("data"):
-                        for t in d["data"]:
-                            p = t.get("price", 0)
-                            if 0 < p <= w["p"]:
-                                await bot.send_message(
-                                    cid,
-                                    f"🔔 *WATCHLIST АЛЕРТ!*\n"
-                                    f"*{ap(w['o'])} → {ap(w['d'])}*\n"
-                                    f"💶 *€{p}* (поріг €{w['p']})\n"
-                                    f"🔗 [Aviasales](https://www.aviasales.com/search/{w['o']}{w['d']})",
-                                    parse_mode="Markdown",
-                                    disable_web_page_preview=True
-                                )
-                                break
+                    for i in range(1, 3):
+                        month = (now + timedelta(days=30*i)).strftime("%Y-%m")
+                        d = await api_get(session,
+                            "https://api.travelpayouts.com/v1/prices/cheap",
+                            {"origin": w["o"], "depart_date": month,
+                             "currency": "eur", "one_way": "true", "market": "ua"})
+                        if d and d.get("success") and d.get("data"):
+                            dest_data = d["data"].get(w["d"], {})
+                            for _, t in dest_data.items():
+                                p = t.get("price", 0)
+                                if 0 < p <= w["p"]:
+                                    await bot.send_message(
+                                        cid,
+                                        f"🔔 *WATCHLIST АЛЕРТ!*\n\n"
+                                        f"*{ap(w['o'])} → {ap(w['d'])}*\n"
+                                        f"💶 *€{p}* — нижче порогу *€{w['p']}*!\n"
+                                        f"🔗 [Дивитись]"
+                                        f"(https://www.aviasales.com/search/{w['o']}{w['d']})",
+                                        parse_mode="Markdown",
+                                        disable_web_page_preview=True)
+                                    break
             except Exception as e:
-                logger.error(f"watch: {e}")
-            await asyncio.sleep(0.3)
+                log.error(f"watch {cid}: {e}")
+            await asyncio.sleep(0.5)
 
 
-async def check_new_deals():
-    """Сповіщаємо якщо ціна впала більш ніж на 15% від попереднього пошуку"""
+async def task_new_deals():
+    """Авто-сповіщення якщо з'явились нові deals (кожні 6 год)"""
     for cid in list(user_cfg):
         try:
-            s      = cfg(cid)
-            tasks  = []
-            flags  = []
-            if s["one_way"]: tasks.append(search_all(True,  s)); flags.append("ow")
-            if s["ret"]:     tasks.append(search_all(False, s)); flags.append("rt")
-            results = await asyncio.gather(*tasks)
-
-            new_best = {}
+            s       = cfg(cid)
+            s["_cid"] = cid
+            results = await asyncio.gather(
+                search_deals(True,  s),
+                search_deals(False, s),
+            )
+            flags   = ["ow", "rt"]
+            new     = {}
             for flag, deals in zip(flags, results):
                 if deals:
-                    new_best[flag] = deals[0]["price"]
+                    new[flag] = deals[0]["price"]
 
-            prev = prev_best.get(cid, {})
+            prev  = prev_best.get(cid, {})
             alerts = []
-            for flag, price in new_best.items():
+            for flag, price in new.items():
                 if flag in prev and price < prev[flag] * 0.85:
                     label = "one-way" if flag == "ow" else "туди-назад"
+                    drop  = round((1 - price/prev[flag]) * 100)
                     alerts.append(
-                        f"📉 *{label}*: нова низька ціна *€{price:.0f}* "
-                        f"(була €{prev[flag]:.0f}, -{round((1-price/prev[flag])*100)}%)"
+                        f"📉 *{label}*: €{price:.0f} "
+                        f"(було €{prev[flag]:.0f}, -{drop}%)"
                     )
-            prev_best[cid] = new_best
+            prev_best[cid] = new
 
             if alerts:
                 await bot.send_message(
                     cid,
-                    "🔔 *НОВІ DEALS З'ЯВИЛИСЬ!*\n\n" + "\n".join(alerts) +
+                    "🔔 *НОВІ DEALS!*\n\n" + "\n".join(alerts) +
                     "\n\nНатисни /deals щоб переглянути!",
                     parse_mode="Markdown",
-                    reply_markup=kb_main(cid)
-                )
+                    reply_markup=kb_main(cid))
         except Exception as e:
-            logger.error(f"new_deals: {e}")
+            log.error(f"new_deals {cid}: {e}")
 
 
-# ============================================================
+# ════════════════════════════════════════════════
 # ЗАПУСК
-# ============================================================
+# ════════════════════════════════════════════════
 
 async def main():
     await bot.set_my_commands([
         BotCommand(command="start",   description="Головне меню"),
-        BotCommand(command="deals",   description="Пошук deals"),
+        BotCommand(command="deals",   description="Пошук deals зараз"),
         BotCommand(command="flixbus", description="FlixBus наступний місяць"),
-        BotCommand(command="watch",   description="/watch KRK LCA 60"),
+        BotCommand(command="watch",   description="/watch IAS LCA 70 — відстежувати"),
+        BotCommand(command="airport", description="/airport Яси — знайти код"),
         BotCommand(command="help",    description="Довідка"),
     ])
-    scheduler.add_job(daily_deals,      "cron", hour=9,     minute=0)
-    scheduler.add_job(check_watchlist,  "cron", hour="*/3", minute=30)
-    scheduler.add_job(check_new_deals,  "cron", hour="*/6", minute=0)
+
+    scheduler.add_job(task_daily,      "cron", hour=9,      minute=0)
+    scheduler.add_job(task_watchlist,  "cron", hour="*/3",  minute=30)
+    scheduler.add_job(task_new_deals,  "cron", hour="*/6",  minute=15)
     scheduler.start()
-    logger.info("Bot v7 ✈️🏨🚌")
+
+    log.info(f"Bot v8 started | {len(AIRPORTS)} airports | {len(SEARCH_ORIGINS)} origins")
     await dp.start_polling(bot)
 
 
