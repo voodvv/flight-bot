@@ -439,9 +439,8 @@ async def fetch_from_origin(
     now   = datetime.now()
     deals = []
     seen  = set()
-    markets = ["ua", "pl", "ro", "en"]  # різні ринки для більшого охоплення
 
-    def add(dest, price, dep, ret_d, stops, airline, market=""):
+    def add(dest, price, dep, ret_d, stops, airline):
         if not dest or len(dest) != 3:
             return
         dest = dest.upper()
@@ -453,7 +452,6 @@ async def fetch_from_origin(
         if key in seen:
             return
         seen.add(key)
-
         nights = None
         if not one_way and ret_d:
             try:
@@ -464,11 +462,8 @@ async def fetch_from_origin(
                     return
             except:
                 pass
-
-        # накопичуємо для середньої ціни
         rk = f"{origin}-{dest}-{'ow' if one_way else 'rt'}"
         route_prices.setdefault(rk, []).append(price)
-
         deals.append({
             "origin": origin, "destination": dest,
             "price": price, "airline": airline or "",
@@ -477,41 +472,86 @@ async def fetch_from_origin(
             "link": f"https://www.aviasales.com/search/{origin}{dest}",
         })
 
-    # ── 1. /v1/prices/cheap — для кожного місяця і ринку ──
-    for market in markets[:2]:
-        for i in range(1, 5):
+    # ── 1. GraphQL API — найнадійніше, реальні дані ──
+    for i in range(1, 4):
+        month = (now + timedelta(days=30*i)).strftime("%Y-%m-01")
+        if one_way:
+            query = """{ prices_one_way(
+                params: { origin: "%s" depart_months: "%s" }
+                paging: { limit: 30 offset: 0 }
+                sorting: VALUE_ASC
+            ) { departure_at value trip_duration ticket_link destination { iata } airline { iata } } }""" % (origin, month)
+        else:
+            query = """{ prices_round_trip(
+                params: { origin: "%s" depart_months: "%s" min_trip_duration: 1 max_trip_duration: 7 }
+                paging: { limit: 30 offset: 0 }
+                sorting: VALUE_ASC
+            ) { departure_at return_at value trip_duration ticket_link destination { iata } airline { iata } } }""" % (origin, month)
+        try:
+            async with session.post(
+                "https://api.travelpayouts.com/graphql/v1/query",
+                json={"query": query},
+                headers={"X-Access-Token": TP_TOKEN, "Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                log.info(f"[GraphQL] {origin} {'OW' if one_way else 'RT'} m+{i} HTTP {r.status}")
+                if r.status == 200:
+                    d = await r.json()
+                    key_name = "prices_one_way" if one_way else "prices_round_trip"
+                    tickets = (d.get("data") or {}).get(key_name) or []
+                    log.info(f"  → {len(tickets)} результатів")
+                    for t in tickets:
+                        price = t.get("value", 0)
+                        dest  = (t.get("destination") or {}).get("iata", "")
+                        air   = (t.get("airline") or {}).get("iata", "")
+                        dep   = t.get("departure_at", "")
+                        ret   = t.get("return_at", "") if not one_way else ""
+                        add(dest, price, dep, ret, 0, air)
+        except Exception as e:
+            log.error(f"GraphQL {origin}: {e}")
+
+    # ── 2. /v2/prices/latest — без origin/dest = топ-30 дешевих ──
+    # (запускаємо тільки один раз для origin)
+    d = await api_get(session,
+        "https://api.travelpayouts.com/v2/prices/latest",
+        {"origin": origin, "currency": "eur", "period_type": "year",
+         "page": 1, "limit": 30, "sorting": "price", "trip_class": 0,
+         "one_way": "true" if one_way else "false",
+         "show_to_affiliates": "false"})
+    if d and d.get("success") and d.get("data"):
+        for t in d["data"]:
+            add(t.get("destination",""), t.get("value",0),
+                t.get("depart_date",""), t.get("return_date",""),
+                t.get("number_of_changes",0), "")
+
+    # ── 3. /v1/prices/cheap — класичний кеш, всі ринки ──
+    for market in ["ua", "pl", "ro", "en", "de", "fr"]:
+        for i in range(1, 4):
             month = (now + timedelta(days=30*i)).strftime("%Y-%m")
-            p = {"origin": origin, "depart_date": month,
-                 "currency": "eur", "one_way": "true" if one_way else "false",
-                 "market": market}
+            p = {"origin": origin, "depart_date": month, "currency": "eur",
+                 "one_way": "true" if one_way else "false", "market": market}
             if not one_way:
                 p["return_date"] = (now + timedelta(days=30*i+4)).strftime("%Y-%m")
-            d = await api_get(session, "https://api.travelpayouts.com/v1/prices/cheap", p)
+            d = await api_get(session,
+                "https://api.travelpayouts.com/v1/prices/cheap", p)
             if d and d.get("success") and d.get("data"):
                 for dest, tickets in d["data"].items():
                     for _, t in tickets.items():
                         add(dest, t.get("price",0), t.get("departure_at",""),
-                            t.get("return_at",""), t.get("transfers",0),
-                            t.get("airline",""), market)
+                            t.get("return_at",""), t.get("transfers",0), t.get("airline",""))
 
-    # ── 2. /aviasales/v3/prices_for_dates ──
-    for i in range(1, 4):
-        month = (now + timedelta(days=30*i)).strftime("%Y-%m")
-        p = {"origin": origin, "departure_at": month,
-             "currency": "eur", "one_way": "true" if one_way else "false",
-             "sorting": "price", "limit": 30, "unique": "false", "market": "ua"}
-        if not one_way:
-            p["return_at"] = (now + timedelta(days=30*i+4)).strftime("%Y-%m")
-            p["min_trip_duration"] = 1
-            p["max_trip_duration"] = 7
-        d = await api_get(session, "https://api.travelpayouts.com/aviasales/v3/prices_for_dates", p)
-        if d and d.get("success") and d.get("data"):
-            for t in d["data"]:
-                add(t.get("destination",""), t.get("price",0),
-                    t.get("departure_at",""), t.get("return_at",""),
-                    t.get("number_of_changes",0), t.get("airline",""))
+    # ── 4. /v1/prices/monthly — ціни по місяцях ──
+    d = await api_get(session,
+        "https://api.travelpayouts.com/v1/prices/monthly",
+        {"origin": origin, "currency": "eur",
+         "one_way": "true" if one_way else "false"})
+    if d and d.get("success") and d.get("data"):
+        for dest, months_data in d["data"].items():
+            for month_key, t in months_data.items():
+                add(dest, t.get("price",0), t.get("departure_at",""),
+                    t.get("return_at",""), t.get("transfers",0), t.get("airline",""))
 
-    # ── 3. /aviasales/v3/get_special_offers — аномально дешеві ──
+    # ── 5. get_special_offers — аномально дешеві ──
     d = await api_get(session,
         "https://api.travelpayouts.com/aviasales/v3/get_special_offers",
         {"origin": origin, "currency": "eur"})
