@@ -25,7 +25,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ════════════════════════════════════════════════
 # НАЛАШТУВАННЯ — вписати свої ключі
 # ════════════════════════════════════════════════
-TELEGRAM_TOKEN = "8602308787:AAFhZMfMNCcTv-yXTDB1mouUFaOBrO_Jac8"
+TELEGRAM_TOKEN = "AAFhZMfMNCcTv-yXTDB1mouUFaOBrO_Jac8"
 TRAVELPAYOUTS_TOKEN = "83ab9d18d7fb0092294828b8104b50a5"
 
 DEFAULT_BUDGET = 400
